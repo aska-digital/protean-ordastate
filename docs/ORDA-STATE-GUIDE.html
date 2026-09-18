@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orda State — Operator Guide</title>
+<style>
+  body { font: 16px/1.65 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+         color: #1a1a1a; background: #fafafa; margin: 0; }
+  main { max-width: 52rem; margin: 0 auto; padding: 2.5rem 1.25rem 5rem; }
+  h1, h2, h3 { line-height: 1.25; color: #0f172a; }
+  h1 { font-size: 2rem; border-bottom: 3px solid #0f172a; padding-bottom: .4rem; }
+  h2 { font-size: 1.35rem; margin-top: 2.6rem; border-bottom: 1px solid #e2e8f0;
+       padding-bottom: .25rem; }
+  h3 { font-size: 1.1rem; margin-top: 1.8rem; }
+  code { font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+         background: #eef2f7; padding: .1em .35em; border-radius: 4px; }
+  pre { background: #0f172a; color: #e2e8f0; padding: 1rem 1.15rem;
+        border-radius: 8px; overflow-x: auto; }
+  pre code { background: none; color: inherit; padding: 0; font-size: .82rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92rem; }
+  th, td { border: 1px solid #e2e8f0; padding: .45rem .6rem; text-align: left;
+           vertical-align: top; }
+  th { background: #f1f5f9; }
+  tr:nth-child(even) td { background: #f8fafc; }
+  blockquote { border-left: 4px solid #94a3b8; margin: 1rem 0; padding: .2rem 1rem;
+               color: #475569; }
+  hr { border: 0; border-top: 1px solid #e2e8f0; margin: 2.5rem 0; }
+  a { color: #2563eb; }
+</style>
+</head>
+<body>
+<main>
+<h1 id="orda-state-operator-guide-public">Orda State — Operator Guide (Public)</h1>
+<p><strong>Version:</strong> v1 contract (schema_version 1, locked 2026-09-18)
+<strong>Audience:</strong> operators running Orda sessions on a single macOS or Linux machine
+<strong>Status of this document:</strong> every command and exit code in this guide was
+verified against the live CLI and the test suite on 2026-09-18. Statements
+about unimplemented or planned behavior are marked explicitly.</p>
+<hr />
+<h2 id="0-quick-start">0. Quick start</h2>
+<pre><code class="language-sh"># 0. Point the examples at your install (portable placeholders used throughout)
+export HERMES_HOME=&quot;$HOME/.hermes&quot;            # adjust if your install lives elsewhere
+export ORDA_HOME=&quot;$HERMES_HOME/eldunari/nexus/state/orda&quot;
+export ORDA=&quot;python3 $ORDA_HOME/tool/orda_state.py&quot;
+# If your distribution ships a wrapper, this is equivalent:
+#   export ORDA=&quot;orda-state&quot;
+
+# 1. One-time: create the state home
+$ORDA init
+
+# 2. Every session: pick a unique session id, read the brief, claim the seat
+export ORDA_SESSION=&quot;my-session-2026-09-18-a&quot;
+$ORDA brief                     # one small read — the current state of the world
+$ORDA claim --session &quot;$ORDA_SESSION&quot; --ttl 900
+
+# 3. Do work through the CLI, never by hand-editing state files
+$ORDA set-project --session &quot;$ORDA_SESSION&quot; --slug my-project \
+    --status running --summary &quot;What I am doing&quot; --next &quot;The next concrete step&quot;
+$ORDA event --session &quot;$ORDA_SESSION&quot; --kind decision \
+    --project my-project --data '{&quot;decision&quot;:&quot;why this choice&quot;}'
+
+# 4. During long work: renew the lease before it expires
+$ORDA renew --session &quot;$ORDA_SESSION&quot;
+
+# 5. When done: release the seat
+$ORDA release --session &quot;$ORDA_SESSION&quot;
+
+# 6. Health check any time (read-only, no seat needed)
+$ORDA verify
+</code></pre>
+<p>If you only remember three rules:</p>
+<ol>
+<li><strong>Reads are free; writes need the seat.</strong> Claim before you write.</li>
+<li><strong>events.jsonl is the truth; state.json is a cache.</strong> Never hand-edit either.</li>
+<li><strong>Never put secrets in state, events, projections, or handoff bundles.</strong></li>
+</ol>
+<hr />
+<h2 id="1-what-orda-state-solves-and-what-it-does-not">1. What Orda state solves — and what it does not</h2>
+<p>Orda is a continuity system for AI-agent (or human) sessions that share one
+operational workload across time. It answers: <em>when a new session starts, how
+does it know exactly where things stand without reading a transcript?</em></p>
+<p>It solves:</p>
+<ul>
+<li><strong>Crash-proof continuity.</strong> A session that dies mid-work leaves an auditable
+  event log; the next session rebuilds state from it in seconds.</li>
+<li><strong>One-writer safety.</strong> Multiple concurrent sessions can read freely, but
+  exactly one holds a lease to write. No silent clobbering, ever.</li>
+<li><strong>Provenance.</strong> Every change is an append-only, hash-chained event: who wrote
+  it, when, and on top of what. Tampering is detectable.</li>
+<li><strong>Compact handoff.</strong> A generated projection (the "brief") carries statuses,
+  decisions, blockers, next actions, and pointers — never full transcripts.</li>
+</ul>
+<p>It does <strong>not</strong> solve:</p>
+<ul>
+<li><strong>Multi-machine coordination.</strong> The write lock (POSIX <code>flock</code>) is local to one
+  filesystem. Two machines pointing at different homes are two unrelated
+  systems; two machines sharing one network mount is unsupported.</li>
+<li><strong>Authentication/authorization.</strong> Anyone with filesystem read access to the
+  home can read; anyone with write access can claim the seat. Security is
+  filesystem permissions, not passwords.</li>
+<li><strong>Rich querying.</strong> The projection is compact by design; deep history means
+  reading events.jsonl.</li>
+<li><strong>Secrets storage.</strong> There is no encrypted secret store here, by design.</li>
+<li><strong>Real-time messaging.</strong> The brief is read at session start; there is no
+  notification channel between sessions.</li>
+</ul>
+<hr />
+<h2 id="2-canonical-state-location-and-file-layout">2. Canonical state location and file layout</h2>
+<p>Default home (overridable for every command with <code>--home PATH</code>):</p>
+<pre><code>$HERMES_HOME/eldunari/nexus/state/orda/
+</code></pre>
+<p>Layout:</p>
+<pre><code>&lt;home&gt;/
+  state.json        Materialized current state: revision, epoch, projects{}
+                    (a rebuildable cache — see §10)
+  events.jsonl      Append-only hash-chained event log. THE TRUTH. (§10)
+  seat.json         Current seat lease: holder session, expiry, epoch (§5)
+  .lock             The flock target for every mutation (0600)
+  events/           Reserved directory (currently empty)
+  projection/
+    brief.md        Compact human brief (generated; do not hand-edit)
+    brief.json      Same brief, machine-readable
+  tool/
+    orda_state.py   CLI entry point
+    orda_store.py   Store: leases, CAS, hash chain, atomic writes
+    orda_brief.py   Projection builder and markdown renderer
+    orda_taskhome.py  Legacy TASK-HOME.md parser (migration surface)
+    tests/          Test suite (unit + real multi-process concurrency)
+  ARCHITECTURE.md   Design record: invariants I1–I8, decision history
+  MIGRATION.md      Migration/handoff receipt from the cutover to v1
+</code></pre>
+<p>Installed file permissions: <code>state.json</code>, <code>events.jsonl</code>, <code>seat.json</code>, <code>.lock</code>
+are <code>0600</code> (owner-only); documentation is <code>0644</code>. Keep it that way (§14).</p>
+<p><strong>Rule of ownership:</strong> everything under the state home is either generated
+(<code>state.json</code>, <code>events.jsonl</code>, <code>projection/</code>) or documentation. The only things
+a human may add are handoff bundles written to a location <em>outside</em> the home.</p>
+<hr />
+<h2 id="3-first-time-setup-and-prerequisites">3. First-time setup and prerequisites</h2>
+<p>Prerequisites:</p>
+<ul>
+<li>Python 3.7+ (verified on 3.9). <strong>Standard library only</strong> — no packages,
+  no pip, no network access.</li>
+<li>macOS or Linux (the write lock uses POSIX <code>flock</code>; Windows is not supported).</li>
+<li>Write access to the state home directory.</li>
+</ul>
+<p>First-time setup:</p>
+<pre><code class="language-sh">$ORDA init          # creates the home; prints {&quot;initialized&quot;: ..., &quot;revision&quot;: 0}
+</code></pre>
+<p><code>init</code> is safe to detect mistakes: running it on an already-initialized home
+exits 2 with "already initialized" and changes nothing.</p>
+<p>What init creates: <code>state.json</code> (revision 0, epoch 1, empty projects),
+an empty <code>events.jsonl</code>, <code>seat.json</code> with no holder, <code>projection/</code>, <code>events/</code>,
+and <code>.lock</code>.</p>
+<p>Recommended: put the state home under version control (the reference install
+keeps it inside a git repository). This gives you audit history, off-machine
+backup, and the rollback path in §16 for free.</p>
+<hr />
+<h2 id="4-starting-a-session">4. Starting a session</h2>
+<p>Every session (agent or human operator) follows the same three steps:</p>
+<pre><code class="language-sh"># a) Read the brief — one small read, never an old transcript
+$ORDA brief                 # markdown; add --format json for machines
+
+# b) Choose a UNIQUE session id (unique across all sessions that ever ran)
+export ORDA_SESSION=&quot;feature-x-2026-09-18-1&quot;
+
+# c) Claim the writer seat
+$ORDA claim --session &quot;$ORDA_SESSION&quot; --ttl 900
+</code></pre>
+<p>A successful claim prints the lease: your session id, <code>acquired_utc</code>,
+<code>expires_utc</code>, <code>epoch</code>, and any takeover note. <code>--note</code> lets you label the
+claim for the audit trail (e.g. <code>--note "continuing lane feature-x"</code>).</p>
+<p>Check the seat at any time (read-only):</p>
+<pre><code class="language-sh">$ORDA seat
+</code></pre>
+<p><code>seat</code> shows the current holder, expiry, epoch, and a boolean
+<code>valid_for_writes</code> (true only while the lease is unexpired).</p>
+<p>Session id rules:</p>
+<ul>
+<li>Must be unique enough to identify the session in the audit log. A slug plus
+  a date plus a counter works well.</li>
+<li>It is your identity for <code>claim</code>/<code>renew</code>/<code>release</code> and every write. Losing it
+  means you cannot renew or release your own lease (§6 recovery covers this).</li>
+</ul>
+<hr />
+<h2 id="5-writer-seat-semantics">5. Writer-seat semantics</h2>
+<p>The model is <strong>one writer, unlimited local readers</strong>:</p>
+<ul>
+<li><strong>Reads never require a lease.</strong> <code>brief</code>, <code>seat</code>, <code>verify</code>, <code>export</code> work
+  from any session, any number at a time.</li>
+<li><strong>Writes require a live lease</strong> matching your session id: <code>set-project</code>,
+  <code>event</code>, <code>reconcile</code>, <code>import</code>, <code>migrate</code>. Without it you get exit 4.</li>
+<li><strong>Assignment is not automatic.</strong> Nobody hands you the seat; you claim it
+  explicitly with <code>claim</code>. If another live session holds it, your claim is
+  refused with exit 4 and the holder's id and expiry in the message.</li>
+</ul>
+<p>Claim outcomes (all verified live):</p>
+<table>
+<thead>
+<tr>
+<th>situation</th>
+<th>result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>seat free</td>
+<td>you hold it; epoch unchanged</td>
+</tr>
+<tr>
+<td>seat held by <em>you</em>, still live</td>
+<td>refresh ("renew-on-claim"); epoch unchanged</td>
+</tr>
+<tr>
+<td>seat held by someone else, still live</td>
+<td>refused, exit 4, unless <code>--steal</code></td>
+</tr>
+<tr>
+<td>seat expired (crashed/abandoned predecessor)</td>
+<td><strong>stale-lease recovery</strong>: your claim succeeds, epoch bumps +1, a <code>takeover</code> event records the previous holder</td>
+</tr>
+<tr>
+<td><code>--steal</code> over a live holder</td>
+<td><strong>recorded forced takeover</strong>: a <code>takeover</code> event with mode <code>stolen-from-live-holder</code> names the displaced session</td>
+</tr>
+</tbody>
+</table>
+<p><code>--steal</code> is an explicit, audited decision — the event log permanently records
+who took the seat from whom. It exists so a stuck session never deadlocks the
+system; use it only after confirming the holder is genuinely dead or wrong
+(check <code>seat</code> and the holder's expected lifetime first).</p>
+<p>Renew and release:</p>
+<pre><code class="language-sh">$ORDA renew --session &quot;$ORDA_SESSION&quot; --ttl 900   # extend from now
+$ORDA release --session &quot;$ORDA_SESSION&quot;           # free the seat immediately
+</code></pre>
+<ul>
+<li><code>renew</code> fails with exit 4 if the lease already expired — reclaim instead.</li>
+<li><code>renew</code> fails with exit 4 if your session id doesn't match the holder.</li>
+<li><code>release</code> by a non-holder is also refused (exit 4); releasing an
+  already-free seat is a harmless no-op that just records the release time.</li>
+</ul>
+<p>Multiple concurrent Orda sessions in practice:</p>
+<ul>
+<li>Sessions A and B both start, both read <code>brief</code> — fine, unlimited.</li>
+<li>A claims. B claims → exit 4. B works read-only, or waits, or (with an
+  explicit decision) takes over with <code>--steal</code>.</li>
+<li>A's lease expires un-renewed. B claims → succeeds as stale-lease recovery;
+  epoch bumps; the log shows A lost the seat at that moment.</li>
+<li>Several worker <em>processes</em> of the SAME session id can write concurrently:
+  the flock serializes them and the CAS on revision keeps the event log
+  consistent (this exact scenario is covered by a real multi-process test).</li>
+</ul>
+<hr />
+<h2 id="6-ttl-behavior-renewal-and-crashed-sessions">6. TTL behavior, renewal, and crashed sessions</h2>
+<ul>
+<li>Default TTL is <strong>900 seconds (15 minutes)</strong>; set your own with
+  <code>claim --ttl N</code> / <code>renew --ttl N</code>. <code>seat.json</code> stores <code>ttl_s</code> and
+  <code>expires_utc</code>.</li>
+<li>The TTL is a <strong>liveness assertion, not a timer that interrupts you.</strong> Nothing
+  kills your work at expiry — but at expiry your <em>next write</em> fails with exit 4
+  and another session may claim stale-lease recovery.</li>
+<li>Renewal expectation: renew at least once per TTL while you hold the seat
+  during long work. A practical pattern is to renew at every natural checkpoint
+  (after each batch of writes). Renewal extends from <em>now</em>, not from expiry, so
+  renewing early never loses time.</li>
+<li>If a session <strong>crashes or forgets to release:</strong></li>
+<li>the lease simply expires after its TTL; nothing is corrupted;</li>
+<li>the next <code>claim</code> performs stale-lease recovery automatically (epoch bump,
+    <code>takeover</code> event) — no operator intervention needed;</li>
+<li>the dead session's last writes are fully durable (§10 crash windows);</li>
+<li>the dead session cannot come back and write, because its id no longer
+    matches the holder — it gets exit 4 and must re-claim.</li>
+<li>Forcing over a <em>live</em> seat always requires <code>--steal</code> and is recorded.</li>
+</ul>
+<hr />
+<h2 id="7-command-reference">7. Command reference</h2>
+<p>Conventions: <code>$ORDA</code> is the CLI (§0), <code>$ORDA_SESSION</code> your session id.
+All commands accept <code>--home PATH</code> to override the state home.
+Exit codes: <strong>0</strong> ok · <strong>2</strong> usage · <strong>3</strong> revision conflict · <strong>4</strong>
+lease/seat refusal · <strong>5</strong> integrity failure. (An unexpected Python traceback
+exits 1 — treat it as a bug, not an expected code.)</p>
+<h3 id="init-create-the-state-home-one-time">init — create the state home (one time)</h3>
+<pre><code class="language-sh">$ORDA init
+# → {&quot;initialized&quot;: &quot;.../orda&quot;, &quot;revision&quot;: 0}
+</code></pre>
+<h3 id="seat-inspect-the-current-lease-read-only">seat — inspect the current lease (read-only)</h3>
+<pre><code class="language-sh">$ORDA seat
+# → holder, session, acquired/renew/expires UTC, ttl_s, epoch, note,
+#   valid_for_writes
+</code></pre>
+<h3 id="claim-acquire-the-writer-seat">claim — acquire the writer seat</h3>
+<pre><code class="language-sh">$ORDA claim --session &quot;$ORDA_SESSION&quot; [--ttl 900] [--steal] [--note &quot;...&quot;]
+</code></pre>
+<p>See §5 for the outcome table.</p>
+<h3 id="renew-extend-your-lease">renew — extend your lease</h3>
+<pre><code class="language-sh">$ORDA renew --session &quot;$ORDA_SESSION&quot; [--ttl 900]
+</code></pre>
+<h3 id="release-free-the-seat">release — free the seat</h3>
+<pre><code class="language-sh">$ORDA release --session &quot;$ORDA_SESSION&quot;
+</code></pre>
+<h3 id="set-project-upsert-a-project-record">set-project — upsert a project record</h3>
+<pre><code class="language-sh">$ORDA set-project --session &quot;$ORDA_SESSION&quot; --slug my-project \
+    [--status running|awaiting-owner|blocked|paused|followup|closed] \
+    [--summary &quot;one-line what/why&quot;] \
+    [--next &quot;the next concrete action&quot;] \
+    [--blocker &quot;first blocker;second blocker&quot;] \
+    [--detail-ref &quot;docs/notes.md#my-project&quot;] \
+    [--expected-rev 41]
+</code></pre>
+<ul>
+<li>Fields are merged onto the existing record; omitted fields are left alone.</li>
+<li><code>--blocker</code> is a semicolon-separated list and replaces the whole list.</li>
+<li><code>--expected-rev N</code> enables optimistic concurrency: the write lands only if
+  the current revision is still N; otherwise exit 3 (§10).</li>
+<li>Status values are free text, but the projection groups records under the six
+  sections above — using those values keeps the brief tidy.</li>
+<li><strong>Accuracy note:</strong> <code>ARCHITECTURE.md</code> lists a <code>--tag</code> flag in its command
+  table, but the v1 CLI does not implement it (verified against the source).
+  Tags enter records only through <code>migrate</code> from a legacy TASK-HOME file, or a
+  future CLI version. Do not script against <code>--tag</code>.</li>
+</ul>
+<h3 id="event-append-a-decision-conflict-note-custom-event">event — append a decision / conflict / note / custom event</h3>
+<pre><code class="language-sh">$ORDA event --session &quot;$ORDA_SESSION&quot; --kind decision \
+    [--project my-project] [--data '{&quot;key&quot;:&quot;value&quot;}'] [--note &quot;...&quot;] \
+    [--expected-rev 41]
+</code></pre>
+<ul>
+<li><code>--data</code> must be valid JSON (exit 2 otherwise). The suggested kinds are
+  <code>decision</code>, <code>conflict</code>, <code>note</code>; other custom kinds are accepted.</li>
+<li>Decisions and the last 10 conflicts/takeovers surface in the projection.</li>
+<li>Event data is payload-light by convention: record the <em>decision and its
+  pointer</em>, not the whole document (§13).</li>
+</ul>
+<h3 id="brief-read-the-compact-projection-read-only">brief — read the compact projection (read-only)</h3>
+<pre><code class="language-sh">$ORDA brief                    # markdown to stdout
+$ORDA brief --format json      # machine-readable
+$ORDA brief --write            # also (re)write projection/brief.{md,json}
+</code></pre>
+<p>Output: a header line (revision, epoch, seat holder + expiry, last writer),
+status sections (<code>RUNNING</code>, <code>AWAITING OWNER</code>, <code>BLOCKED</code>, <code>PAUSED</code>,
+<code>OPEN FOLLOW-UPS</code>, <code>CLOSED</code>), unresolved conflicts, recent decisions, and
+pointers to the underlying files. Summaries are capped (~220 chars) — this is
+a cockpit read, not an archive.</p>
+<h3 id="verify-integrity-check-read-only">verify — integrity check (read-only)</h3>
+<pre><code class="language-sh">$ORDA verify
+# → {&quot;ok&quot;: true, &quot;problems&quot;: [], &quot;events&quot;: 117, &quot;revision&quot;: 117, ...}
+</code></pre>
+<p>Checks the hash chain, revision consistency between state and event log, and
+projection freshness. Any problem ⇒ report on stdout, <code>ERROR[5]</code> on stderr,
+exit 5.</p>
+<h3 id="reconcile-rebuild-statejson-from-eventsjsonl">reconcile — rebuild state.json from events.jsonl</h3>
+<pre><code class="language-sh">$ORDA reconcile --session &quot;$ORDA_SESSION&quot;    # requires the lease
+</code></pre>
+<p>Repairs a crash window (state behind the log). <strong>Does not repair a tampered
+event log</strong> — see §10 and §16.</p>
+<h3 id="migrate-import-a-legacy-task-home-style-file-idempotent">migrate — import a legacy TASK-HOME-style file (idempotent)</h3>
+<pre><code class="language-sh">$ORDA migrate --session &quot;$ORDA_SESSION&quot; --source TASK-HOME.md [--label &quot;...&quot;]
+</code></pre>
+<p>Parses <code>## SECTION</code> headings (RUNNING / AWAITING OWNER / PAUSED /
+OPEN FOLLOW-UPS / CLOSED) and <code>- slug: TAG — summary</code> bullets into project
+records. Idempotent: unchanged records re-run clean (<code>changed: 0</code>). Every
+parsed slug is guaranteed to land (zero-loss). The source file is <strong>never
+modified or deleted</strong>; each record's <code>detail_ref</code> points back into it.</p>
+<h3 id="export-bounded-handoff-bundle">export — bounded handoff bundle</h3>
+<pre><code class="language-sh">$ORDA export --out /tmp/handoff.json
+# → {&quot;kind&quot;: &quot;orda-handoff&quot;, &quot;schema_version&quot;: 1, &quot;exported_utc&quot;: ...,
+#     &quot;from_session&quot;: ..., &quot;brief&quot;: {...}}
+</code></pre>
+<p>Projection + references only. <strong>Never contains a transcript.</strong> Write the
+bundle outside the state home.</p>
+<h3 id="import-record-a-received-handoff-bundle">import — record a received handoff bundle</h3>
+<pre><code class="language-sh">$ORDA import --session &quot;$ORDA_SESSION&quot; --file /tmp/handoff.json
+</code></pre>
+<p>Validates the bundle kind and appends a <code>handoff-import</code> event (additive;
+nothing overwrites). Requires the lease.</p>
+<hr />
+<h2 id="8-exit-codes-and-recovery-actions">8. Exit codes and recovery actions</h2>
+<table>
+<thead>
+<tr>
+<th>code</th>
+<th>meaning</th>
+<th>typical trigger</th>
+<th>recovery</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>success</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>2</td>
+<td>usage error</td>
+<td>unknown command; missing/invalid flag; <code>--data</code> not JSON; <code>init</code> on initialized home; <code>import</code> of a non-orda-handoff file; source file missing</td>
+<td>fix the command line; read the message</td>
+</tr>
+<tr>
+<td>3</td>
+<td>revision conflict (CAS)</td>
+<td><code>--expected-rev</code> no longer matches current revision</td>
+<td>re-read state (<code>brief</code> or <code>set-project</code> without <code>--expected-rev</code> to see current values), re-apply your change on top of the winner's version, retry with the new revision. Never "force" — the loser's data was rejected, not half-applied</td>
+</tr>
+<tr>
+<td>4</td>
+<td>lease/seat refusal</td>
+<td>write without claiming; expired lease; <code>claim</code> over a live foreign seat; <code>renew</code>/<code>release</code> by a non-holder or after expiry</td>
+<td><code>seat</code> to see who holds it. Yours expired → <code>claim</code> again. Someone else live → coordinate or <code>--steal</code> as an explicit decision. Someone else's stale seat → plain <code>claim</code> (auto stale-recovery)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>integrity failure</td>
+<td>hash-chain mismatch or tampered event; state/event revision mismatch; stale projection</td>
+<td>See §10/§16: crash-window → <code>reconcile</code>; tampered log → restore from git/backup; stale projection → <code>brief --write</code> after repairing</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-architecture-at-a-glance">9. Architecture at a glance</h2>
+<pre><code>                read (no lease needed)
+   any session ──────────────────────────────────────────────┐
+        │                                                    │
+        │ write (needs live lease)                           ▼
+        ▼                                              projection/brief.{md,json}
+   ┌─────────┐  flock(&lt;home&gt;/.lock)   ┌────────────────┐        ▲
+   │ seat    │───────────────────────▶│ event append    │        │ generated
+   │ lease   │  CAS: expected-rev ==  │ (fsync, hash    │        │ after every
+   └─────────┘  current revision?    │  chained)       │        │ mutation
+        │             │ no→exit 3    └───────┬────────┘        │
+        │             │ yes                  │                 │
+        │             ▼                      ▼                 │
+        │      ┌─────────────┐  atomic rename  ┌───────────┐  │
+        └─────▶│ state.json  │◀────────────────│ events.   │──┘
+               │ (cache)     │   rebuildable   │ jsonl     │
+               └─────────────┘                 │ (TRUTH)   │
+                                               └───────────┘
+</code></pre>
+<ul>
+<li><strong>events.jsonl is the truth</strong> (I1): every mutation is one appended event;
+  <code>state.json</code> is a rebuildable cache. <code>reconcile</code> rebuilds it; nothing else.</li>
+<li><strong>Hash chain</strong> (I2): each event carries <code>seq</code>, <code>revision</code>, UTC timestamp,
+  writer session, kind, project, JSON data, <code>prev_hash</code>, <code>hash</code>
+  (sha256 over the previous hash plus the canonical event JSON). Genesis
+  <code>prev_hash</code> is 64 zeros. Any edit to history breaks the chain detectably.</li>
+<li><strong>Every mutation</strong>: take exclusive flock on <code>&lt;home&gt;/.lock</code> → check the
+  caller's lease → CAS the expected revision → append the event (fsync) →
+  atomically rename the new <code>state.json</code> (I3, I4).</li>
+<li><strong>Crash windows</strong>: a crash after the event lands but before the state rename
+  leaves <code>state.json</code> exactly one event behind — never torn or partial.
+  <code>verify</code> flags it ("state revision N behind event log revision N+1 — crash
+  window; run reconcile"); <code>reconcile</code> repairs it. (Verified live.)</li>
+<li><strong>What reconcile cannot fix</strong>: a tampered <code>events.jsonl</code>. The log is the
+  truth, so there is nothing to rebuild <em>from</em>. Restore it from version
+  control or backup instead (§16). Verified live: after tampering seq 1,
+  <code>reconcile</code> rebuilt state but <code>verify</code> still exited 5 — by design.</li>
+</ul>
+<hr />
+<h2 id="10-concurrency-internals-cas-flock-atomic-writes">10. Concurrency internals (CAS, flock, atomic writes)</h2>
+<ul>
+<li><strong>CAS / revisions.</strong> Every event bumps a global monotonic <code>revision</code>.
+  A writer may pin <code>--expected-rev N</code>; if another writer moved the revision
+  first, the write is rejected with exit 3 and the current revision and last
+  writer are named. Without the flag, writes still serialize under the lock —
+  the flag is for read-modify-write protection, not for correctness of the log
+  itself.</li>
+<li><strong>flock.</strong> All mutations take an exclusive <code>flock</code> on <code>&lt;home&gt;/.lock</code> for the
+  duration of read-check-append-rename. Concurrent processes of the <em>same</em>
+  session therefore lose nothing (each write lands, revisions stay monotonic);
+  this is exercised by a real 4-writer × 10-write multi-process test.</li>
+<li><strong>Atomic writes.</strong> <code>state.json</code>, <code>seat.json</code>, and projections are written to
+  a temp file in the same directory, fsynced, then <code>rename(2)</code>d over the
+  target — readers never see a partial file.</li>
+<li><strong>Takeover discipline.</strong> Distinct sessions never overwrite each other
+  silently: a second session must record an explicit <code>--steal</code> takeover, and
+  each such takeover appears as a <code>takeover</code> event naming the previous holder
+  (tested with 4 racing sessions: exactly the expected takeovers recorded).</li>
+</ul>
+<hr />
+<h2 id="11-session-handoff-between-modelssessions-no-transcripts">11. Session handoff between models/sessions (no transcripts)</h2>
+<p>The protocol, end to end:</p>
+<pre><code class="language-sh"># ── Outgoing session ──────────────────────────────────────────────
+$ORDA set-project ...        # leave statuses/summaries/next-actions current
+$ORDA event --kind decision --data '{&quot;decision&quot;:&quot;...&quot;,&quot;why&quot;:&quot;...&quot;}'
+$ORDA export --out /tmp/handoff.json   # optional point-in-time bundle
+$ORDA release --session &quot;$ORDA_SESSION&quot;
+
+# ── Incoming session (fresh context, same machine or same home) ───
+$ORDA brief                            # ONE small read — no transcript
+export ORDA_SESSION=&quot;next-session-id&quot;
+$ORDA claim --session &quot;$ORDA_SESSION&quot;
+$ORDA import --session &quot;$ORDA_SESSION&quot; --file /tmp/handoff.json   # if exported
+</code></pre>
+<p>Why this works without transcripts: the projection already carries current
+statuses, decisions, blockers, next actions, and unresolved conflicts; deeper
+detail is consulted lazily from <code>events.jsonl</code> (searchable by seq/kind/writer)
+and from <code>detail_ref</code> pointers into your own documents. The handoff bundle is
+a convenience snapshot of exactly that projection — sharing it is optional.</p>
+<hr />
+<h2 id="12-task-home-compatibility-window-and-migration">12. TASK-HOME compatibility window and migration</h2>
+<p>If you are coming from a hand-edited markdown task home:</p>
+<ul>
+<li><code>migrate --source TASK-HOME.md</code> imports it into the store — idempotently and
+  with zero loss (every parsed slug is asserted present afterwards; the live
+  cutover migration moved 102 records / 101 upserts and verified clean).</li>
+<li>The source file is never modified or deleted by the tool; it stays the
+  pre-cutover record and remains readable.</li>
+<li><strong>During the compatibility window</strong> (until all workflows write through
+  <code>set-project</code>/<code>event</code> instead of editing the markdown): after any hand edit
+  of the source file, run <code>migrate</code> again to re-sync. Unchanged runs are
+  no-ops (<code>changed: 0</code>).</li>
+<li>Re-syncs are recorded as <code>migration</code> events with the source's content hash,
+  so the audit log shows exactly which version of the file each sync saw.</li>
+<li>A tool-supplied <code>detail_ref</code> points into the source file (<code>path#slug</code>), so
+  records imported this way still link to their original context.</li>
+</ul>
+<hr />
+<h2 id="13-what-belongs-where">13. What belongs where</h2>
+<table>
+<thead>
+<tr>
+<th>data</th>
+<th>home</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>project statuses, summaries, next actions, blockers</td>
+<td><code>set-project</code> → canonical state</td>
+</tr>
+<tr>
+<td>decisions, conflicts, notes (with pointers)</td>
+<td><code>event</code> → canonical state</td>
+</tr>
+<tr>
+<td>pointers into detail documents</td>
+<td><code>--detail-ref</code> / <code>--data</code> (paths + anchors, not copies)</td>
+</tr>
+<tr>
+<td>credentials, tokens, <code>.env</code>, auth files</td>
+<td>profile-local secret storage — <strong>never</strong> the state home</td>
+</tr>
+<tr>
+<td>process logs, transcripts, per-lane scratch, caches</td>
+<td>profile-local cache/scratch directories</td>
+</tr>
+<tr>
+<td>handoff bundles</td>
+<td>any scratch/export location outside the state home</td>
+</tr>
+</tbody>
+</table>
+<p>Test to apply before any write: <em>"Would I be comfortable if this string appeared
+in a file that is synced, backed up, and audited forever?"</em> If not, it is a
+pointer, not payload (§14).</p>
+<hr />
+<h2 id="14-security-and-privacy-rules">14. Security and privacy rules</h2>
+<ol>
+<li><strong>No secrets in state. Ever.</strong> No tokens, passwords, private keys, account
+   identifiers, personal data, or credential-adjacent material in
+   <code>set-project</code> fields, event <code>--data</code>, the projection, or handoff bundles.
+   The event log is append-only and hash-chained: <strong>you cannot cleanly delete
+   something once written</strong> — correcting requires a compensating event, and the
+   original remains in history.</li>
+<li><strong>Local-machine scope.</strong> The state home is single-machine by design. Do not
+   sync it to shared network locations, and treat exports like any other
+   operational artifact (scan before sharing).</li>
+<li><strong>Filesystem permissions.</strong> State files are created <code>0600</code>. Keep the home
+   out of world-readable directories; multi-user machines should rely on
+   per-user homes (<code>$HERMES_HOME</code> is user-scoped).</li>
+<li><strong>Backups inherit the secrecy.</strong> A git remote or backup of the state home
+   carries everything in it — apply the same access discipline there.</li>
+<li><strong>Handoff bundles are point-in-time state.</strong> <code>export</code> output contains your
+   project records, decisions, and references. Scan it for sensitive strings
+   before sending it anywhere.</li>
+</ol>
+<hr />
+<h2 id="15-known-limits-and-breaking-points-v1">15. Known limits and breaking points (v1)</h2>
+<ul>
+<li><strong>Single machine.</strong> POSIX <code>flock</code> only; no distributed or multi-machine
+  coordination. Two homes = two systems.</li>
+<li><strong>Single writer.</strong> Deliberate: the seat models one operator. Throughput is
+  not the goal; correctness of continuity is.</li>
+<li><strong>Unbounded event log.</strong> <code>events.jsonl</code> grows forever. <strong>Chain-preserving
+  compaction (fold + archive with a head-hash anchor) is planned future work,
+  not implemented in v1.</strong> Until then: log size is the archive; disk is cheap;
+  <code>brief</code> keeps reads compact regardless.</li>
+<li><strong>Compatibility-window discipline.</strong> Until workflows stop hand-editing the
+  legacy task home, forgetting <code>migrate</code> after a hand edit leaves the store
+  stale until the next sync. Detectable (revision counters), but manual.</li>
+<li><strong><code>--tag</code> not implemented in the CLI</strong> (documented in ARCHITECTURE.md's
+  command table, absent from the v1 code — verified). Tags arrive via
+  <code>migrate</code> only.</li>
+<li><strong>No schema enforcement on event kinds/data.</strong> Custom kinds and arbitrary
+  JSON are accepted; discipline is conventional, not enforced.</li>
+<li><strong>No built-in auth.</strong> Filesystem permissions are the whole security model.</li>
+<li><strong>Unexpected crashes exit 1</strong> (Python traceback) rather than a documented
+  code — treat as a bug report with the traceback.</li>
+<li><strong>Operational risks:</strong> (a) a session id forgotten before release forces
+  stale-recovery on the next claim (harmless but noisy); (b) a very long TTL
+  (<code>--ttl 999999</code>) makes stale-recovery slow — keep TTLs realistic; (c) hand
+  edits to <code>state.json</code>/<code>events.jsonl</code>/<code>projection/*</code> are tampering by
+  definition — <code>verify</code> will flag them, and the fix is a restore (§16), not a
+  patch.</li>
+</ul>
+<hr />
+<h2 id="16-backup-verification-rollback-disaster-recovery">16. Backup, verification, rollback, disaster recovery</h2>
+<ul>
+<li><strong>Verification cadence.</strong> Run <code>verify</code> at session start, after any anomaly,
+  and before backups. Exit 0 + <code>"ok": true</code> is the health certificate.</li>
+<li><strong>Backups.</strong> The state home is plain JSON/JSONL — commit it to version
+  control or copy it like any file. Commit after meaningful milestones so the
+  backup history aligns with revision history. (The reference install keeps
+  the home inside a git repository.)</li>
+<li><strong>Rollback of state content.</strong> Because the home is version-controlled, you
+  can roll state back by restoring the files from an earlier commit — then run
+  <code>verify</code> (expect exit 5 if you rolled back only <code>state.json</code>: the log will be
+  "ahead" — restore <code>events.jsonl</code> from the same commit to keep them paired).</li>
+<li><strong>Crash-window recovery</strong> (state one event behind log — flagged by verify):
+  <code>sh
+  $ORDA claim --session "$ORDA_SESSION"
+  $ORDA reconcile --session "$ORDA_SESSION"
+  $ORDA verify          # expect exit 0</code></li>
+<li><strong>Tampered/broken event log</strong> (hash mismatch — exit 5 persists after
+  reconcile; verified live):
+  <code>sh
+  # events.jsonl is the truth — repair means restore, not rehash:
+  git -C &lt;repo-with-the-home&gt; checkout &lt;last-good-commit&gt; -- nexus/state/orda/
+  $ORDA verify          # expect exit 0
+  # No git? Restore events.jsonl (and state.json with it) from your backup.</code>
+  Never "fix" hashes in place: the chain is the tamper evidence, and rewriting
+  history would make every future audit untrustworthy.</li>
+<li><strong>Stale projection</strong> (verify reports "projection brief.json at revision X,
+  state at Y"): any mutation regenerates it; or run <code>brief --write</code> once
+  repaired.</li>
+<li><strong>Full disaster.</strong> Worst case, the truth (<code>events.jsonl</code>) plus a seat/epoch
+  you no longer care about is everything. Re-initializing (<code>init</code> fails on an
+  existing home — move the old home aside first) and re-running <code>migrate</code> from
+  your source documents reconstructs the operational surface; history is lost
+  unless you kept the old <code>events.jsonl</code> — keep it.</li>
+</ul>
+<hr />
+<h2 id="17-troubleshooting-matrix">17. Troubleshooting matrix</h2>
+<table>
+<thead>
+<tr>
+<th>symptom</th>
+<th>likely cause</th>
+<th>action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ERROR[4]: no live lease for session 'x'</code></td>
+<td>never claimed, or lease expired</td>
+<td><code>$ORDA seat</code>, then <code>claim --session x</code></td>
+</tr>
+<tr>
+<td><code>ERROR[4]: seat held by 'y' until T</code></td>
+<td>another live writer</td>
+<td>coordinate; or confirm y is dead and <code>claim --steal</code> (recorded)</td>
+</tr>
+<tr>
+<td><code>ERROR[3]: revision conflict: expected N, current M</code></td>
+<td>concurrent writer since your read</td>
+<td>re-read, merge your change on top, retry with the new revision</td>
+</tr>
+<tr>
+<td><code>ERROR[5]: seq N: prev_hash mismatch / hash mismatch</code></td>
+<td>event log edited or corrupted</td>
+<td>restore <code>events.jsonl</code> (+<code>state.json</code>) from git/backup (§16)</td>
+</tr>
+<tr>
+<td><code>verify</code>: "state revision behind event log … run reconcile"</td>
+<td>crash window</td>
+<td>claim + <code>reconcile</code> + <code>verify</code></td>
+</tr>
+<tr>
+<td><code>verify</code>: "projection … stale projection; run: brief --write"</td>
+<td>projection older than state</td>
+<td><code>brief --write</code> after any repair</td>
+</tr>
+<tr>
+<td><code>ERROR[2]: already initialized</code></td>
+<td><code>init</code> on existing home</td>
+<td>nothing to do; use <code>seat</code>/<code>brief</code></td>
+</tr>
+<tr>
+<td>writes vanish / brief looks old</td>
+<td>someone hand-edited the legacy task home without re-syncing</td>
+<td>run <code>migrate --source ...</code> again</td>
+</tr>
+<tr>
+<td><code>ERROR[2]: --data must be valid JSON</code></td>
+<td>unquoted or malformed JSON</td>
+<td>quote the payload; validate with <code>python3 -m json.tool</code></td>
+</tr>
+<tr>
+<td><code>renew</code> says "lease already expired"</td>
+<td>TTL lapsed</td>
+<td><code>claim</code> again (stale-recovery if free)</td>
+</tr>
+<tr>
+<td>exit 1 + traceback</td>
+<td>unexpected bug</td>
+<td>capture output, report with traceback; state is consistent (mutations are atomic)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="18-version-and-status-labeling">18. Version and status labeling</h2>
+<ul>
+<li><strong>v1 contract (implemented, tested, verified live 2026-09-18):</strong> everything
+  in §2–§17 — seat/lease semantics, CAS, hash chain, crash windows, projection,
+  migrate/export/import, exit codes 0/2/3/4/5. Schema version: 1. Design
+  invariants: I1–I8 in <code>ARCHITECTURE.md</code>.</li>
+<li><strong>Planned future work (NOT implemented in v1 — do not rely on it):</strong>
+  chain-preserving event-log compaction (fold + archive anchored at a head
+  hash); moving dispatch workflows fully onto the CLI (ending the TASK-HOME
+  compatibility window); possible <code>--tag</code> support in <code>set-project</code>.</li>
+<li><strong>Explicitly out of scope for v1:</strong> multi-machine coordination, DB backends
+  (a DB would have to justify itself against git + a read-only projection),
+  secrets storage, notification channels.</li>
+</ul>
+<p>Change discipline: v1 is locked; behavioral changes require a new design
+decision record and a schema-version bump where representation changes.</p>
+<hr />
+<h2 id="appendix-a-verified-example-transcript-2026-09-18-sandbox-home">Appendix A. Verified-example transcript (2026-09-18, sandbox home)</h2>
+<pre><code class="language-sh">$ orda-state init --session demo-init
+{&quot;initialized&quot;: &quot;.../demo&quot;, &quot;revision&quot;: 0}
+
+$ orda-state claim --session demo --ttl 300 --note &quot;guide verification session&quot;
+{ &quot;acquired_utc&quot;: &quot;2026-09-18T14:41:18Z&quot;, &quot;epoch&quot;: 1,
+  &quot;expires_utc&quot;: &quot;2026-09-18T14:46:18Z&quot;, &quot;holder&quot;: &quot;demo&quot;,
+  &quot;note&quot;: &quot;guide verification session&quot;, &quot;renew_utc&quot;: &quot;2026-09-18T14:41:18Z&quot;,
+  &quot;session&quot;: &quot;demo&quot;, &quot;ttl_s&quot;: 300 }
+
+$ orda-state set-project --session demo --slug example-project \
+    --status running --summary &quot;Working on the example feature&quot; \
+    --next &quot;Run integration tests&quot; \
+    --blocker &quot;needs API token;waiting on review&quot; \
+    --detail-ref &quot;docs/example.md#example-project&quot;
+{&quot;event_seq&quot;: 1, &quot;revision&quot;: 1, &quot;slug&quot;: &quot;example-project&quot;}
+
+$ orda-state event --session demo --kind decision \
+    --project example-project --data '{&quot;decision&quot;:&quot;ship staging before production&quot;}'
+{&quot;event_seq&quot;: 2, &quot;revision&quot;: 2}
+
+$ orda-state renew --session demo --ttl 300
+{ &quot;acquired_utc&quot;: &quot;2026-09-18T14:41:18Z&quot;, &quot;epoch&quot;: 1,
+  &quot;expires_utc&quot;: &quot;2026-09-18T14:46:19Z&quot;, &quot;holder&quot;: &quot;demo&quot;,
+  &quot;note&quot;: &quot;guide verification session&quot;, &quot;renew_utc&quot;: &quot;2026-09-18T14:41:19Z&quot;,
+  &quot;session&quot;: &quot;demo&quot;, &quot;ttl_s&quot;: 300 }
+
+$ orda-state brief --format md
+# Orda Live Brief (projection — generated; do not hand-edit)
+
+revision 2 | epoch 1 | seat demo (expires 2026-09-18T14:46:19Z) | last writer demo
+
+## RUNNING
+- example-project: Working on the example feature | next: Run integration tests | blockers: needs API token; waiting on review
+
+Detail: events.jsonl (through seq 2) — pointers only, no payload copied.
+
+$ orda-state set-project --session demo --slug example-project \
+    --summary &quot;conflicting write&quot; --expected-rev 1
+ERROR[3]: revision conflict: expected 1, current 2 (last writer demo)      # exit 3
+
+$ orda-state set-project --session ghost --slug x --status running
+ERROR[4]: no live lease for session 'ghost' (claim first; ...)             # exit 4
+
+$ orda-state event --session demo --kind note --data 'not-json'
+ERROR[2]: --data must be valid JSON                                        # exit 2
+
+$ orda-state verify
+{&quot;events&quot;: 2, &quot;last_event_rev&quot;: 2, &quot;ok&quot;: true, &quot;problems&quot;: [], &quot;revision&quot;: 2}
+</code></pre>
+<p>All outputs above are verbatim from a live run against a scratch home; only
+paths are abbreviated. The canonical home verified clean in the same session
+(<code>ok: true</code>, 117 events, revision 117).</p>
+<h2 id="appendix-b-test-coverage-v1-suite">Appendix B. Test coverage (v1 suite)</h2>
+<p><code>python3 -m unittest discover -s &lt;home&gt;/tool/tests -t &lt;home&gt;/tool/tests</code> —
+verified passing 2026-09-18. Covers: write-requires-lease (exit 4), claim/
+renew/release lifecycle, second-session refusal without steal, stale-lease
+recovery with epoch bump + takeover event, CAS revision conflict (exit 3,
+loser's data rejected), monotonic revisions + hash chain, crash-window
+flag-and-repair, projection rebuild, TASK-HOME zero-loss migration +
+idempotency + source-untouched, tampered log ⇒ <code>verify</code> exit 5,
+export/import roundtrip, full CLI flow, and real multi-process concurrency
+(shared seat, no lost updates; distinct sessions, explicit takeovers).</p>
+</main>
+</body>
+</html>
