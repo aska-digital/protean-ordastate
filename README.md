@@ -48,7 +48,7 @@ $ORDA claim --session "$ORDA_SESSION" --ttl 900
 
 # 3. Do work through the CLI, never by hand-editing state files
 $ORDA set-project --session "$ORDA_SESSION" --slug my-project --status active
-$ORDA event --session "$ORDA_SESSION" --type decision --data '{"note":"..."}'
+$ORDA event --session "$ORDA_SESSION" --kind decision --data '{"note":"..."}'
 
 # 4. Leave cleanly (or let the lease expire; recovery is documented)
 $ORDA release --session "$ORDA_SESSION"
