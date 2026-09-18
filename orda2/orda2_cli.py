@@ -14,7 +14,7 @@ import glob
 # allow running as python -m orda2.orda2_cli and as script
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from orda2.orda2_store import Store, StoreError, EXIT_CONFLICT, EXIT_LEASE, EXIT_INTEGRITY, EXIT_USAGE, Lock, atomic_write, run_git, git_head, utcnow, parse_utc, slug_valid
+from orda2.orda2_store import Store, StoreError, EXIT_CONFLICT, EXIT_LEASE, EXIT_INTEGRITY, EXIT_USAGE, Lock, atomic_write, run_git, git_head, utcnow, parse_utc, slug_valid, scan_for_secrets, assert_no_secrets, check_main_clean
 from orda2.orda2_events import ZERO_HASH, event_hash, read_events, verify_chain, write_events, rechain_segment
 from orda2.orda2_migration import init_home
 
@@ -103,6 +103,9 @@ def _branch_for_session(home, session):
 def cmd_propose(args):
     home = require_home(args)
     session = args.session
+    # --- main cleanliness gate (attack 8): refuse if main is dirty ---
+    if os.path.isdir(os.path.join(home, ".git")):
+        check_main_clean(home)
     wt, branch = _branch_for_session(home, session)
     store = Store(home)
 
@@ -139,9 +142,34 @@ def cmd_propose(args):
             enriched["slug"] = slug
             enriched["writer"] = session
             enriched["updated_utc"] = utcnow()
+            # --- secrets scan (attack 7): refuse token-shaped values, redact value ---
+            _scan_text = json.dumps(enriched, sort_keys=True)
+            _hit = scan_for_secrets(_scan_text, "records/%s.json" % slug)
+            if _hit:
+                raise StoreError(EXIT_USAGE, "secrets scan hit in records/%s.json: pattern %s — value redacted (refused)" % (slug, _hit))
             # keep rev for now as existing rev (CAS check at merge)
             os.makedirs(os.path.dirname(rec_path), exist_ok=True)
             atomic_write(rec_path, json.dumps(enriched, indent=2, sort_keys=True) + "\n")
+
+    # Also scan any existing modified records in worktree for secrets (covers manual edits without --file)
+    try:
+        _r = run_git(["status", "--porcelain", "--", "records"], cwd=wt, check=False)
+        for _line in _r.stdout.splitlines():
+            _parts = _line.strip().split()
+            if not _parts:
+                continue
+            _fp = _parts[-1]
+            if _fp.startswith("records/") and _fp.endswith(".json"):
+                _full = os.path.join(wt, _fp)
+                if os.path.exists(_full):
+                    _t = open(_full).read()
+                    _hit = scan_for_secrets(_t, _fp)
+                    if _hit:
+                        raise StoreError(EXIT_USAGE, "secrets scan hit in %s: pattern %s — value redacted (refused)" % (_fp, _hit))
+    except StoreError:
+        raise
+    except Exception:
+        pass
 
     if args.rebase:
         # Manual rebase: save changed records, reset to main, reapply
@@ -325,6 +353,9 @@ def cmd_ingest(args):
     batch_id = args.batch or datetime.datetime.now(datetime.timezone.utc).strftime("batch-%Y%m%d-%H%M%S")
     # create ingest branch worktree
     store = Store(home)
+    # main cleanliness gate (attack 8)
+    if os.path.isdir(os.path.join(home, ".git")):
+        check_main_clean(home)
     branch = "orda/ingest/%s" % batch_id
     # if branch already exists, use existing worktree
     wt_path = os.path.join(home, "worktrees", "_ingest", batch_id)
@@ -361,10 +392,11 @@ def cmd_ingest(args):
         if not slug or not slug_valid(slug):
             quarantine.append({"item": item, "reason": "invalid slug"})
             continue
-        # secrets scan trivial
+        # secrets scan — broadened (attack 7): refuse token-shaped values
         text = json.dumps(item)
-        if "PRIVATE_KEY" in text or "AKIA" in text or "ghp_" in text:
-            quarantine.append({"item": item, "reason": "secrets scan hit"})
+        _hit = scan_for_secrets(text, "inbox/%s/%s.json" % (batch_id, slug))
+        if _hit:
+            raise StoreError(EXIT_USAGE, "secrets scan hit in inbox/%s/%s.json: pattern %s — value redacted (refused)" % (batch_id, slug, _hit))
             continue
         # dedupe
         if slug in existing_slugs or content_hash in seen_hashes:
@@ -512,6 +544,9 @@ def cmd_merge(args):
     # require seat
     store.require_seat(session)
 
+    # --- main cleanliness gate (attack 8): merge refuses when main has foreign uncommitted changes ---
+    check_main_clean(home)
+
     # load manifest from proposal branch
     manifest_text = None
     try:
@@ -635,6 +670,22 @@ def cmd_merge(args):
                    c["slug"], proposal_branch, c["slug"]))
         print(msg, file=sys.stderr)
         return EXIT_CONFLICT
+
+    # G4 secrets scan (attack 7): pre-merge gate — refuse if proposal would land a secret
+    try:
+        # Scan proposal branch records/inbox files for secrets
+        _diff_r = run_git(["diff", "--name-only", manifest.get("base_main_commit", "main"), proposal_branch], cwd=home, check=False)
+        for _fp in [l.strip() for l in _diff_r.stdout.splitlines() if l.strip()]:
+            if _fp.startswith("records/") or _fp.startswith("inbox/"):
+                _c = run_git(["show", "%s:%s" % (proposal_branch, _fp)], cwd=home, check=False)
+                if _c.returncode == 0:
+                    _hit = scan_for_secrets(_c.stdout, _fp)
+                    if _hit:
+                        raise StoreError(EXIT_USAGE, "secrets scan hit in %s (proposal %s): pattern %s — value redacted (merge refused)" % (_fp, proposal_branch, _hit))
+    except StoreError:
+        raise
+    except Exception:
+        pass
 
     # G2 chain check: segment prev == main head (or needs repropose)
     # For ingestion kind, G3 always passes (namespace disjoint) so we skip conflict above — but we already handled.

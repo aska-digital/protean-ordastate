@@ -19,10 +19,18 @@ def read_events(path):
         return []
     out = []
     with open(path) as f:
-        for line in f:
+        for idx, line in enumerate(f, start=1):
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 out.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                # Surface as a corrupt-line error that verify() will treat as integrity failure (exit 5).
+                # We raise a ValueError with a structured message so callers can map to exit 5 without traceback.
+                raise ValueError("corrupt events.jsonl line %d: unparseable JSON (%s) — integrity failure" % (idx, e.msg))
+            except Exception as e:
+                raise ValueError("corrupt events.jsonl line %d: %s — integrity failure" % (idx, e))
     return out
 
 
@@ -61,7 +69,7 @@ def verify_chain(events):
         if e.get("prev_hash") != prev:
             problems.append("seq %s: prev_hash mismatch (chain broken)" % e.get("seq"))
         if e.get("hash") != event_hash(prev, e):
-            problems.append("seq %s: hash mismatch" % e.get("seq"))
+            problems.append("seq %s: hash mismatch (event tampered or corrupt)" % e.get("seq"))
         prev = e.get("hash", prev)
     return problems
 
@@ -71,11 +79,23 @@ def verify_store(home, events_path=None, state_path=None):
     events_path = events_path or os.path.join(home, "events.jsonl")
     state_path = state_path or os.path.join(home, "state.json")
     problems = []
-    events = read_events(events_path)
+    try:
+        events = read_events(events_path)
+    except ValueError as e:
+        return {"ok": False, "problems": [str(e)], "events": 0}
+    except Exception as e:
+        return {"ok": False, "problems": ["events read failed: %s" % e], "events": 0}
     problems.extend(verify_chain(events))
     if os.path.exists(state_path):
-        with open(state_path) as f:
-            state = json.load(f)
+        try:
+            with open(state_path) as f:
+                state = json.load(f)
+        except json.JSONDecodeError as e:
+            problems.append("state.json corrupt: unparseable JSON (%s) — integrity failure" % e.msg)
+            return {"ok": False, "problems": problems, "events": len(events)}
+        except Exception as e:
+            problems.append("state.json read failed: %s — integrity failure" % e)
+            return {"ok": False, "problems": problems, "events": len(events)}
         last_rev = events[-1]["revision"] if events else 0
         # v2: state revision tracks event count / last revision
         if state.get("revision", 0) < last_rev:

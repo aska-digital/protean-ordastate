@@ -12,7 +12,7 @@ Prototype per `leo-decision-memo.md` §11 (branch `orda2/prototype`). Stdlib + g
 
 ```
 orda2/           orda2_cli.py, orda2_store.py, orda2_events.py, orda2_projection.py, orda2_migration.py, orda2_ingest.py
-tests/           test_concurrency.py, test_conflict.py, test_crash_recovery.py, test_migration.py, test_reader_roundtrip.py, test_ingest.py (also test_orda2.py aggregate)
+tests/           test_concurrency.py, test_conflict.py, test_crash_recovery.py, test_migration.py, test_reader_roundtrip.py, test_ingest.py, test_remediation.py
 sandbox/         v1-snapshot/ (synthetic 8-record rev-21), fixtures/links25.json (25 items, one malformed, one duplicate), fixtures/v1-100/ (100-record rev-126), demo/run.sh
 ```
 
@@ -24,7 +24,7 @@ bash sandbox/demo/run.sh
 # demo writes to a temp home; to use a fixed home:
 bash sandbox/demo/run.sh /tmp/my-orda-home
 
-# tests T1-T6 (each spins a temp home, never the live store)
+# tests (each spins a temp home, never the live store)
 python3 -m pytest tests/ -v
 
 # individual tests
@@ -52,9 +52,17 @@ export --home H [--out F]
 
 Fault injection (crash recovery): `ORDA2_CRASH_AFTER=splice|records-move|projection` before `merge`.
 
+## Enforcement boundary (honest)
+
+The prototype has no server; enforcement is CLI-level + git. The filesystem retains OS-level writability — a process that bypasses the CLI entirely writes a git worktree it owns (or directly mutates the main checkout). The defense is:
+
+- Every mutating CLI command (`propose`, `merge`, `ingest`, etc.) re-verifies main is clean (no untracked/modified `records/`, `events/`, `state/`) BEFORE it operates and refuses with an explanatory message when main is dirty - a direct writer's debris cannot be silently worked around.
+- `merge` additionally refuses when main has foreign uncommitted changes; the merge seat's pre-merge cleanliness check is the gate that catches bypasses.
+- A bypass that never goes through `merge` leaves debris that the next legitimate `verify`/`merge`/`propose` will surface as a dirty-main error, not a silent acceptance.
+
 ## Recorded output (this branch)
 
-Tests: `6 passed` (pytest). Demo: exits 0; final lines include `=== DEMO COMPLETE ===` plus `verify ok`, `projection matches reconcile`, `export bundle carries no transcript/secrets`, `git fsck ok`. See `sandbox/demo/run.sh` output for the exact conflict message:
+Tests: `24 passed` (pytest). Demo: exits 0; final lines include `=== DEMO COMPLETE ===` plus `verify ok`, `projection matches reconcile`, `export bundle carries no transcript/secrets`, `git fsck ok`. See `sandbox/demo/run.sh` output for the exact conflict message:
 
 ```
 CONFLICT orda/prop/sess-b/1 vs main — record: proj-x

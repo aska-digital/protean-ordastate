@@ -95,6 +95,82 @@ def slug_valid(slug):
     return bool(re.match(r"^[a-z0-9][a-z0-9._-]{1,63}$", slug))
 
 
+# ---------- Secrets scan (attack 7) ----------
+_SECRET_PATTERNS = [
+    (re.compile(r'xox[baprs]-[A-Za-z0-9\-_]+'), 'slack-token (xox*)'),
+    (re.compile(r'sk-[A-Za-z0-9\-_]{15,}'), 'openai-key (sk-)'),
+    (re.compile(r'ghp_[A-Za-z0-9]{15,}'), 'github-pat (ghp_)'),
+    (re.compile(r'github_pat_[A-Za-z0-9_]{15,}'), 'github-pat (github_pat_)'),
+    (re.compile(r'AKIA[0-9A-Z]{16}'), 'aws-key (AKIA)'),
+    (re.compile(r'Bearer\s+[A-Za-z0-9\-_\.=]{10,}'), 'bearer-token (Bearer )'),
+]
+_GENERIC_KEY_RE = re.compile(r'(?i)(api[_-]?key|secret|token)')
+
+
+def scan_for_secrets(text, filename=""):
+    """Scan text for secret patterns. Returns pattern label or None. Value is redacted."""
+    if not isinstance(text, str):
+        text = json.dumps(text)
+    for pat, label in _SECRET_PATTERNS:
+        if pat.search(text):
+            return label
+    # generic key-name + high-entropy value detection
+    # Try JSON parsing first for precise key matching
+    try:
+        obj = json.loads(text) if text.strip().startswith(("{", "[")) else None
+    except Exception:
+        obj = None
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if _GENERIC_KEY_RE.search(k) and isinstance(v, str) and len(v) >= 16 and re.search(r'[A-Za-z0-9\-_\.=]{12,}', v):
+                return 'generic-secret (api_key/token/secret)'
+            if isinstance(v, (dict, list)):
+                # shallow recurse one level for nested structures
+                if isinstance(v, dict):
+                    for kk, vv in v.items():
+                        if _GENERIC_KEY_RE.search(kk) and isinstance(vv, str) and len(vv) >= 16:
+                            return 'generic-secret (api_key/token/secret)'
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, dict):
+                for k, v in item.items():
+                    if _GENERIC_KEY_RE.search(k) and isinstance(v, str) and len(v) >= 16:
+                        return 'generic-secret (api_key/token/secret)'
+    # raw-text fallback for non-JSON or inline key=value
+    if re.search(r'(?i)(api[_-]?key|secret|token)\s*[:=]\s*["\']?[A-Za-z0-9\-_\.=]{16,}', text):
+        return 'generic-secret (api_key/token/secret)'
+    # also catch JSON key with quoted high-entropy value even if not parsed as above
+    if _GENERIC_KEY_RE.search(text) and re.search(r'[:=]\s*["\']?[A-Za-z0-9\-_\.=]{16,}["\']?', text):
+        # only trigger if there's a plausible high-entropy token nearby (avoid false positives on short words)
+        # check that the matched value segment has length >=16
+        # we already matched generic pattern above; be conservative: require at least 16-char alnum segment
+        m = re.search(r'(?i)(api[_-]?key|secret|token)[^A-Za-z0-9]*[:=][^A-Za-z0-9]*["\']?([A-Za-z0-9\-_\.=]{16,})', text)
+        if m:
+            return 'generic-secret (api_key/token/secret)'
+    return None
+
+
+def assert_no_secrets(text, filename):
+    label = scan_for_secrets(text, filename)
+    if label:
+        raise StoreError(EXIT_USAGE, "secrets scan hit in %s: pattern %s — value redacted (refused)" % (filename, label))
+
+
+# ---------- Main cleanliness (attack 8) ----------
+def check_main_clean(home):
+    """Verify main checkout has no untracked/modified records/, events/, state/. Refuse if dirty."""
+    # Use git status --porcelain for the relevant paths
+    r = run_git(["status", "--porcelain", "--", "records", "events.jsonl", "state.json", "inbox", "projection"], cwd=home, check=False)
+    out = r.stdout.strip()
+    if out:
+        # Show first few lines, redact full content but name the paths
+        lines = [l.strip() for l in out.splitlines() if l.strip()]
+        preview = "; ".join(lines[:3])
+        if len(lines) > 3:
+            preview += " (+%d more)" % (len(lines) - 3)
+        raise StoreError(EXIT_USAGE, "main is dirty (%s) — direct writes detected; main must be clean (no untracked/modified records/, events/, state/) before mutating operations; discard or commit debris then retry" % preview)
+
+
 # ---------- Store class (main worktree) ----------
 class Store:
     def __init__(self, home):
@@ -323,11 +399,26 @@ class Store:
     # ---- verify / reconcile ----
     def verify(self):
         problems = []
-        events = read_events(self.events_path)
+        # Read events with corruption handling
+        try:
+            events = read_events(self.events_path)
+        except ValueError as e:
+            # Corrupt events.jsonl -> integrity failure (exit 5)
+            return {"ok": False, "problems": [str(e)], "events": 0}
+        except Exception as e:
+            return {"ok": False, "problems": ["events read failed: %s — integrity failure" % e], "events": 0}
         problems.extend(verify_chain(events))
+        # Check state.json parses
         if os.path.exists(self.state_path):
-            with open(self.state_path) as f:
-                state = json.load(f)
+            try:
+                with open(self.state_path) as f:
+                    state = json.load(f)
+            except json.JSONDecodeError as e:
+                problems.append("state.json corrupt: unparseable JSON (%s) — integrity failure" % e.msg)
+                return {"ok": False, "problems": problems, "events": len(events)}
+            except Exception as e:
+                problems.append("state.json read failed: %s — integrity failure" % e)
+                return {"ok": False, "problems": problems, "events": len(events)}
             last_rev = events[-1]["revision"] if events else 0
             if state.get("revision", 0) < last_rev:
                 problems.append("state revision %s behind event log revision %s (crash window; run reconcile)" % (state.get("revision"), last_rev))
@@ -341,22 +432,59 @@ class Store:
                         problems.append("projection brief.json at revision %s, state at %s (stale projection; run reconcile)" % (brief.get("revision"), state.get("revision")))
                 except Exception:
                     pass
-        # git fsck quick
+        # Check each record file parses (detect corrupt git objects via parse)
+        rec_dir = os.path.join(self.home, "records")
+        if os.path.isdir(rec_dir):
+            for fn in os.listdir(rec_dir):
+                if fn.endswith(".json"):
+                    rp = os.path.join(rec_dir, fn)
+                    try:
+                        with open(rp) as f:
+                            json.load(f)
+                    except json.JSONDecodeError as e:
+                        problems.append("records/%s corrupt: unparseable JSON (%s) — integrity failure" % (fn, e.msg))
+                    except Exception as e:
+                        problems.append("records/%s read failed: %s — integrity failure" % (fn, e))
+        # git fsck quick — catches corrupt git objects
         try:
             r = run_git(["fsck", "--no-dangling"], cwd=self.home, check=False)
             if r.returncode != 0:
-                problems.append("git fsck failed: %s" % r.stderr.strip()[:300])
+                problems.append("git fsck failed: %s — integrity failure (possible corrupt git object)" % r.stderr.strip()[:500])
         except Exception as e:
-            problems.append("git fsck error: %s" % e)
+            problems.append("git fsck error: %s — integrity failure" % e)
         return {"ok": not problems, "problems": problems, "events": len(events)}
 
     def reconcile(self, session="reconcile"):
         """Rebuild state.json + projection from events.jsonl + records on main."""
+        # First verify integrity — refuse if corrupt (do not silently rebuild)
+        report = self.verify()
+        # Allow reconcile to proceed only if problems are limited to stale state/projection (crash window), not corruption.
+        # Any corruption-class problem must cause refusal.
+        corruption_keywords = ("corrupt", "unparseable", "hash mismatch", "prev_hash mismatch", "chain broken", "tampered", "git fsck failed", "integrity failure")
+        has_corruption = any(any(kw in p.lower() for kw in corruption_keywords) for p in report.get("problems", []))
+        # Note: "hash mismatch" and chain errors are corruption; "behind"/"stale projection" are not corruption and are repairable.
+        # If has_corruption and not just stale, refuse.
+        # Distinguish: stale state/projection messages contain "behind" or "stale projection" — those are recoverable.
+        # If the only problems are behind/stale, we allow rebuild. Otherwise refuse.
+        if has_corruption:
+            # Check if problems are exclusively recoverable stale messages
+            non_recoverable = []
+            for p in report["problems"]:
+                low = p.lower()
+                if "behind" in low or "stale projection" in low:
+                    continue
+                # any other problem including corrupt/hash/fsck is non-recoverable for reconcile
+                non_recoverable.append(p)
+            if non_recoverable:
+                raise StoreError(EXIT_INTEGRITY, "reconcile refused: chain integrity failure — %s (verify exit 5; repair corruption before reconciling)" % "; ".join(non_recoverable[:2]))
+        # If verify passed or only had recoverable staleness, proceed to rebuild
         with Lock(self.home):
-            events = read_events(self.events_path)
-            # rebuild state from records on disk (main) + events?
-            # Easiest: load existing state.json and reset projects from records/ + events
-            # Actually rebuild from git records + replay
+            # Re-check events still parse (defensive)
+            try:
+                events = read_events(self.events_path)
+            except ValueError as e:
+                raise StoreError(EXIT_INTEGRITY, "reconcile refused: %s" % e)
+            # rebuild state from records on disk (main) + events
             state = {"schema_version": SCHEMA_VERSION, "revision": events[-1]["revision"] if events else 0, "epoch": self.load_seat().get("epoch", 1), "updated_utc": events[-1]["ts"] if events else utcnow(), "writer": session, "projects": {}}
             # Load all records from disk
             rec_dir = os.path.join(self.home, "records")
@@ -367,6 +495,8 @@ class Store:
                             rec = json.load(open(os.path.join(rec_dir, fn)))
                             state["projects"][rec.get("slug") or fn[:-5]] = rec
                         except Exception:
+                            # If a record file is corrupt, we already flagged it as corruption above and refused,
+                            # so this branch shouldn't be reached for corrupt files.
                             pass
             # ensure revision matches last event
             if events:
