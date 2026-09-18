@@ -458,23 +458,14 @@ class Store:
         """Rebuild state.json + projection from events.jsonl + records on main."""
         # First verify integrity — refuse if corrupt (do not silently rebuild)
         report = self.verify()
-        # Allow reconcile to proceed only if problems are limited to stale state/projection (crash window), not corruption.
-        # Any corruption-class problem must cause refusal.
-        corruption_keywords = ("corrupt", "unparseable", "hash mismatch", "prev_hash mismatch", "chain broken", "tampered", "git fsck failed", "integrity failure")
-        has_corruption = any(any(kw in p.lower() for kw in corruption_keywords) for p in report.get("problems", []))
-        # Note: "hash mismatch" and chain errors are corruption; "behind"/"stale projection" are not corruption and are repairable.
-        # If has_corruption and not just stale, refuse.
-        # Distinguish: stale state/projection messages contain "behind" or "stale projection" — those are recoverable.
-        # If the only problems are behind/stale, we allow rebuild. Otherwise refuse.
-        if has_corruption:
-            # Check if problems are exclusively recoverable stale messages
+        # Refuse on any chain integrity failure; only stale state/projection (crash window) is recoverable.
+        if not report.get("ok", False):
             non_recoverable = []
-            for p in report["problems"]:
-                low = p.lower()
+            for prob in report.get("problems", []):
+                low = prob.lower()
                 if "behind" in low or "stale projection" in low:
                     continue
-                # any other problem including corrupt/hash/fsck is non-recoverable for reconcile
-                non_recoverable.append(p)
+                non_recoverable.append(prob)
             if non_recoverable:
                 raise StoreError(EXIT_INTEGRITY, "reconcile refused: chain integrity failure — %s (verify exit 5; repair corruption before reconciling)" % "; ".join(non_recoverable[:2]))
         # If verify passed or only had recoverable staleness, proceed to rebuild

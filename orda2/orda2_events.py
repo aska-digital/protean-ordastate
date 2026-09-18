@@ -65,12 +65,31 @@ def append_event(path, event_dict_without_hash):
 def verify_chain(events):
     problems = []
     prev = ZERO_HASH
-    for e in events:
+    expected_seq = 1
+    required_fields = ["seq", "prev_hash", "hash", "revision", "ts", "writer", "kind"]
+    for idx, e in enumerate(events, start=1):
+        seq = e.get("seq")
+        # required-field presence
+        for field in required_fields:
+            if field not in e or e.get(field) is None:
+                problems.append("line %d seq %s: missing required field '%s' — integrity failure" % (idx, seq, field))
+        # monotonic seq check
+        if seq != expected_seq:
+            problems.append("line %d: seq mismatch expected %d got %s (chain broken) — integrity failure" % (idx, expected_seq, seq))
         if e.get("prev_hash") != prev:
-            problems.append("seq %s: prev_hash mismatch (chain broken)" % e.get("seq"))
-        if e.get("hash") != event_hash(prev, e):
-            problems.append("seq %s: hash mismatch (event tampered or corrupt)" % e.get("seq"))
-        prev = e.get("hash", prev)
+            problems.append("seq %s line %d: prev_hash mismatch (chain broken) — integrity failure" % (seq, idx))
+        try:
+            exp = event_hash(prev, e)
+        except Exception as ex:
+            problems.append("seq %s line %d: hash computation failed (%s) — integrity failure" % (seq, idx, ex))
+            exp = None
+        if exp is not None and e.get("hash") != exp:
+            problems.append("seq %s line %d: hash mismatch (event tampered or corrupt) — integrity failure" % (seq, idx))
+        # advance chain: use recorded hash (even if tampered) for next prev check so subsequent prev_hash mismatches are also reported
+        h = e.get("hash")
+        if h:
+            prev = h
+        expected_seq += 1
     return problems
 
 
