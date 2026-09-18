@@ -1,0 +1,174 @@
+[
+  {
+    "slug": "link-0",
+    "status": "active",
+    "summary": "synthetic link 0",
+    "title": "Link 0",
+    "url": "https://example.com/0"
+  },
+  {
+    "slug": "link-1",
+    "status": "active",
+    "summary": "synthetic link 1",
+    "title": "Link 1",
+    "url": "https://example.com/1"
+  },
+  {
+    "slug": "link-2",
+    "status": "active",
+    "summary": "synthetic link 2",
+    "title": "Link 2",
+    "url": "https://example.com/2"
+  },
+  {
+    "slug": "link-3",
+    "status": "active",
+    "summary": "synthetic link 3",
+    "title": "Link 3",
+    "url": "https://example.com/3"
+  },
+  {
+    "slug": "link-4",
+    "status": "active",
+    "summary": "synthetic link 4",
+    "title": "Link 4",
+    "url": "https://example.com/4"
+  },
+  {
+    "slug": "link-5",
+    "status": "active",
+    "summary": "synthetic link 5",
+    "title": "Link 5",
+    "url": "https://example.com/5"
+  },
+  {
+    "slug": "link-6",
+    "status": "active",
+    "summary": "synthetic link 6",
+    "title": "Link 6",
+    "url": "https://example.com/6"
+  },
+  {
+    "slug": "link-7",
+    "status": "active",
+    "summary": "synthetic link 7",
+    "title": "Link 7",
+    "url": "https://example.com/7"
+  },
+  {
+    "slug": "link-8",
+    "status": "active",
+    "summary": "synthetic link 8",
+    "title": "Link 8",
+    "url": "https://example.com/8"
+  },
+  {
+    "slug": "link-9",
+    "status": "active",
+    "summary": "synthetic link 9",
+    "title": "Link 9",
+    "url": "https://example.com/9"
+  },
+  {
+    "title": "malformed entry",
+    "url": "https://example.com/10"
+  },
+  {
+    "slug": "link-11",
+    "status": "active",
+    "summary": "synthetic link 11",
+    "title": "Link 11",
+    "url": "https://example.com/11"
+  },
+  {
+    "slug": "link-12",
+    "status": "active",
+    "summary": "synthetic link 12",
+    "title": "Link 12",
+    "url": "https://example.com/12"
+  },
+  {
+    "slug": "link-13",
+    "status": "active",
+    "summary": "synthetic link 13",
+    "title": "Link 13",
+    "url": "https://example.com/13"
+  },
+  {
+    "slug": "link-14",
+    "status": "active",
+    "summary": "synthetic link 14",
+    "title": "Link 14",
+    "url": "https://example.com/14"
+  },
+  {
+    "slug": "link-0",
+    "status": "active",
+    "summary": "dup",
+    "title": "duplicate of 0",
+    "url": "https://example.com/dup"
+  },
+  {
+    "slug": "link-16",
+    "status": "active",
+    "summary": "synthetic link 16",
+    "title": "Link 16",
+    "url": "https://example.com/16"
+  },
+  {
+    "slug": "link-17",
+    "status": "active",
+    "summary": "synthetic link 17",
+    "title": "Link 17",
+    "url": "https://example.com/17"
+  },
+  {
+    "slug": "link-18",
+    "status": "active",
+    "summary": "synthetic link 18",
+    "title": "Link 18",
+    "url": "https://example.com/18"
+  },
+  {
+    "slug": "link-19",
+    "status": "active",
+    "summary": "synthetic link 19",
+    "title": "Link 19",
+    "url": "https://example.com/19"
+  },
+  {
+    "slug": "link-20",
+    "status": "active",
+    "summary": "synthetic link 20",
+    "title": "Link 20",
+    "url": "https://example.com/20"
+  },
+  {
+    "slug": "link-21",
+    "status": "active",
+    "summary": "synthetic link 21",
+    "title": "Link 21",
+    "url": "https://example.com/21"
+  },
+  {
+    "slug": "link-22",
+    "status": "active",
+    "summary": "synthetic link 22",
+    "title": "Link 22",
+    "url": "https://example.com/22"
+  },
+  {
+    "slug": "link-23",
+    "status": "active",
+    "summary": "synthetic link 23",
+    "title": "Link 23",
+    "url": "https://example.com/23"
+  },
+  {
+    "slug": "link-24",
+    "status": "active",
+    "summary": "synthetic link 24",
+    "title": "Link 24",
+    "url": "https://example.com/24"
+  }
+]

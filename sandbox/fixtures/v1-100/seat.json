@@ -1,0 +1,10 @@
+{
+  "acquired_utc": null,
+  "epoch": 1,
+  "expires_utc": null,
+  "holder": null,
+  "note": "init",
+  "renew_utc": null,
+  "session": null,
+  "ttl_s": 900
+}
