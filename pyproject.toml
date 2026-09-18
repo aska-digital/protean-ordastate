@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orda2"
+version = "0.1.0"
+description = "Orda State v2 prototype — git-substrate multi-writer"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.setuptools]
+packages = ["orda2"]
