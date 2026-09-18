@@ -1,108 +1,81 @@
-# Orda State
+# Orda State v2 prototype — git-substrate multi-writer
 
-Shared continuity, state, and handoff layer for multi-session agent
-orchestration. When several agent sessions work on the same projects across
-days, models, and restarts, Orda State gives them one canonical, append-only
-state home: a writer seat with explicit claiming, an event log with hash-chain
-integrity, a compact projection for cheap session starts, and a handoff bundle
-that moves the seat between sessions without importing a transcript.
+Prototype per `leo-decision-memo.md` §11 (branch `orda2/prototype`). Stdlib + git only, no server, no network at runtime. All data synthetic under `sandbox/`; live store untouched.
 
-**This repository is documentation only.** The operator guide here describes
-the system and how to run it; it is not a state store. The canonical state of
-any deployment lives on the machine that runs it, in that deployment's own
-state home - never in a copy of this repository.
+## What it is
 
-## Do you need this?
+- **Home** is a git repo with `main` checked out (`records/`, `events.jsonl`, `state.json`, `projection/brief.{md,json}`, `proposal-conflicts/`, `reviews/`, `seat.json`).
+- **Writers** each get a worktree + branch `orda/prop/<session>/<n>`; ingest uses `orda/ingest/<batch>`.
+- **Seat** (single merge lease, `seat.json` + flock) is the only writer to `main`: gate → splice → regenerate → commit. Exit codes 0/2/3/4/5 as v1.
 
-USE WHEN:
+## Module layout
 
-- Multiple agent sessions (different models, different days, crashed and
-  restarted) must share one evolving picture of projects, decisions, blockers,
-  and next actions.
-- You need exactly one writer at a time, with unlimited read-only observers,
-  and a takeover path that is explicit and recorded.
-- Session handoff must be cheap and lossless without re-reading transcripts.
-
-SKIP WHEN:
-
-- A single session owns everything and never hands off - a plain file is
-  simpler.
-- You need multi-machine coordination. v1 is single-machine (POSIX flock);
-  that limit is stated, not hidden. See the guide, section 15.
-
-## Quick start
-
-```sh
-# Point the examples at your install (portable placeholders throughout)
-export HERMES_HOME="$HOME/.hermes"            # adjust if your install lives elsewhere
-export ORDA_HOME="$HERMES_HOME/eldunari/nexus/state/orda"
-export ORDA="python3 $ORDA_HOME/tool/orda_state.py"
-
-# 1. One-time: create the state home
-$ORDA init
-
-# 2. Every session: pick a unique session id, read the brief, claim the seat
-export ORDA_SESSION="my-session-$(date +%Y%m%d-%H%M%S)"
-$ORDA brief
-$ORDA claim --session "$ORDA_SESSION" --ttl 900
-
-# 3. Do work through the CLI, never by hand-editing state files
-$ORDA set-project --session "$ORDA_SESSION" --slug my-project --status active
-$ORDA event --session "$ORDA_SESSION" --kind decision --data '{"note":"..."}'
-
-# 4. Leave cleanly (or let the lease expire; recovery is documented)
-$ORDA release --session "$ORDA_SESSION"
+```
+orda2/           orda2_cli.py, orda2_store.py, orda2_events.py, orda2_projection.py, orda2_migration.py, orda2_ingest.py
+tests/           test_concurrency.py, test_conflict.py, test_crash_recovery.py, test_migration.py, test_reader_roundtrip.py, test_ingest.py, test_remediation.py
+sandbox/         v1-snapshot/ (synthetic 8-record rev-21), fixtures/links25.json (25 items, one malformed, one duplicate), fixtures/v1-100/ (100-record rev-126), demo/run.sh
 ```
 
-## The guide
+## Reproduce
 
-The full operator guide is [`docs/ORDA-STATE-GUIDE.md`](docs/ORDA-STATE-GUIDE.md)
-(a zero-build rendered copy is at
-[`docs/ORDA-STATE-GUIDE.html`](docs/ORDA-STATE-GUIDE.html)). Every command,
-exit code, and limit in it was verified against the live CLI and the v1 test
-suite; statements about planned behavior are marked explicitly. It covers:
+```sh
+# demo — full §11 scenario (3+ writers, one seat, one reader, conflict refused, crash+recovery, ingest, round-trip) from clean clone
+bash sandbox/demo/run.sh
+# demo writes to a temp home; to use a fixed home:
+bash sandbox/demo/run.sh /tmp/my-orda-home
 
-- what Orda State solves and what it does not;
-- canonical state location and file layout;
-- first-time setup and session start (brief, session id, seat claim);
-- writer-seat semantics: one writer, unlimited readers, claim/renew/release,
-  stale recovery, explicit `--steal`, recorded takeovers;
-- TTL behavior and crashed-session recovery;
-- all CLI commands with examples and the exit-code table (0/2/3/4/5) with
-  recovery actions;
-- concurrency internals: CAS revision conflicts, flock, atomic writes,
-  hash-chain integrity, reconcile;
-- session handoff between models/sessions without transcript import;
-- what belongs in state versus local secrets, logs, caches, and scratch;
-- security and privacy rules, backup, verification, rollback, and disaster
-  recovery;
-- known limits of the v1 contract and a troubleshooting matrix.
+# tests (each spins a temp home, never the live store)
+python3 -m pytest tests/ -v
 
-## Security boundary
+# individual tests
+python3 -m pytest tests/test_concurrency.py tests/test_conflict.py tests/test_crash_recovery.py tests/test_migration.py tests/test_reader_roundtrip.py tests/test_ingest.py -v
 
-The state is local-machine scope. Credentials, tokens, transcripts, logs,
-caches, and scratch never belong in the state, the events, the projections, or
-a handoff bundle. State files are written with restrictive permissions. Session
-ids are bearer credentials for the seat: pick unguessable ids and do not share
-them. The guide's section 14 is the authoritative statement.
+# CLI help
+python3 -m orda2.orda2_cli --help
+```
 
-## Relationship to the Protean kit
+## CLI (python -m orda2.orda2_cli)
 
-Orda State is the continuity layer beneath a multi-agent team's procedure
-layer. The meeting/decision procedure (councils) and the dispatch control
-plane that reference this state system are documented in the
-[protean-control-plane](https://github.com/aska-digital/protean-control-plane)
-repository; this repository is the state system's own home and the guide's
-canonical location.
+```
+init --home H [--from-v1 V1SNAPSHOT]
+worktree new --home H --session S
+propose --home H --session S [--file BATCH.json] [--rebase]
+ingest --home H --session INGEST --file links.json [--batch B]
+seat claim|renew|release --home H --session S [--ttl T] [--steal]
+review --home H [--wait --timeout T]
+merge --home H --session S --proposal P
+conflicts --home H
+brief --home H [--format md|json]
+verify | reconcile --home H [--session S]
+export --home H [--out F]
+```
 
-## Version and status
+Fault injection (crash recovery): `ORDA2_CRASH_AFTER=splice|records-move|projection` before `merge`.
 
-- Guide and contract: **v1** (schema_version 1, locked 2026-09-18). Verified
-  against the live CLI and the 18-test suite on 2026-09-18.
-- Planned, not implemented: chain-preserving event-log compaction, migration
-  of dispatch flows off the legacy task-home file, multi-machine coordination.
-  These are labeled as future work in the guide; nothing here claims them.
+## Enforcement boundary (honest)
 
-## License
+The prototype has no server; enforcement is CLI-level + git. The filesystem retains OS-level writability — a process that bypasses the CLI entirely writes a git worktree it owns (or directly mutates the main checkout). The defense is:
 
-MIT. The committed `LICENSE` file is authoritative.
+- Every mutating CLI command (`propose`, `merge`, `ingest`, etc.) re-verifies main is clean (no untracked/modified `records/`, `events/`, `state/`) BEFORE it operates and refuses with an explanatory message when main is dirty - a direct writer's debris cannot be silently worked around.
+- `merge` additionally refuses when main has foreign uncommitted changes; the merge seat's pre-merge cleanliness check is the gate that catches bypasses.
+- A bypass that never goes through `merge` leaves debris that the next legitimate `verify`/`merge`/`propose` will surface as a dirty-main error, not a silent acceptance.
+
+## Recorded output (this branch)
+
+Tests: `24 passed` (pytest). Demo: exits 0; final lines include `=== DEMO COMPLETE ===` plus `verify ok`, `projection matches reconcile`, `export bundle carries no transcript/secrets`, `git fsck ok`. See `sandbox/demo/run.sh` output for the exact conflict message:
+
+```
+CONFLICT orda/prop/sess-b/1 vs main — record: proj-x
+  proposal base rev: 21 (writer sess-b, ...)
+  main rev:          50 (writer sess-a, ...)
+  view both:  git show main:records/proj-x.json
+              git show orda/prop/sess-b/1:records/proj-x.json
+  resolve:    repropose on the newer rev, or decide as reviewer
+Refused: same-record concurrent change. Never auto-merged. See brief → Unresolved conflicts. Resolve: orda2 propose --rebase.
+```
+
+## What is unproven
+
+- Volume bound: thousands of small JSON files fine for git; GB-scale blobs would need Hazen F-flip #3 (SQLite fallback).
+- `rerere` is enabled but not exercised beyond recurring same-record conflict; seat takeover epoch bump is minimal (file + event).
+- Projection regeneration is O(events-in-proposal + records) ~ O(100) per merge; full chain `verify` is O(n) with n=~100 in prototype.

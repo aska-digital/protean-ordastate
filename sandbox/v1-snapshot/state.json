@@ -1,0 +1,89 @@
+{
+  "epoch": 1,
+  "projects": {
+    "proj-a": {
+      "detail_ref": "refs/proj-a",
+      "last_writer": "init",
+      "next": "next step for proj-a",
+      "slug": "proj-a",
+      "status": "active",
+      "summary": "update 12 for proj-a",
+      "tag": "",
+      "updated_utc": "2026-09-18T16:59:21Z"
+    },
+    "proj-b": {
+      "detail_ref": "refs/proj-b",
+      "last_writer": "init",
+      "next": "next step for proj-b",
+      "slug": "proj-b",
+      "status": "active",
+      "summary": "update 9 for proj-b",
+      "tag": "",
+      "updated_utc": "2026-09-18T16:59:21Z"
+    },
+    "proj-c": {
+      "detail_ref": "refs/proj-c",
+      "last_writer": "init",
+      "next": "next step for proj-c",
+      "slug": "proj-c",
+      "status": "active",
+      "summary": "update 10 for proj-c",
+      "tag": "",
+      "updated_utc": "2026-09-18T16:59:21Z"
+    },
+    "proj-d": {
+      "detail_ref": "refs/proj-d",
+      "last_writer": "init",
+      "next": "next step for proj-d",
+      "slug": "proj-d",
+      "status": "active",
+      "summary": "update 11 for proj-d",
+      "tag": "",
+      "updated_utc": "2026-09-18T16:59:21Z"
+    },
+    "proj-e": {
+      "detail_ref": "refs/proj-e",
+      "last_writer": "init",
+      "next": "next step for proj-e",
+      "slug": "proj-e",
+      "status": "active",
+      "summary": "synthetic project proj-e summary",
+      "tag": "",
+      "updated_utc": "2026-09-18T16:59:21Z"
+    },
+    "proj-f": {
+      "detail_ref": "refs/proj-f",
+      "last_writer": "init",
+      "next": "next step for proj-f",
+      "slug": "proj-f",
+      "status": "active",
+      "summary": "synthetic project proj-f summary",
+      "tag": "",
+      "updated_utc": "2026-09-18T16:59:21Z"
+    },
+    "proj-g": {
+      "detail_ref": "refs/proj-g",
+      "last_writer": "init",
+      "next": "next step for proj-g",
+      "slug": "proj-g",
+      "status": "running",
+      "summary": "synthetic project proj-g summary",
+      "tag": "",
+      "updated_utc": "2026-09-18T16:59:21Z"
+    },
+    "proj-x": {
+      "detail_ref": "refs/proj-x",
+      "last_writer": "init",
+      "next": "next step for proj-x",
+      "slug": "proj-x",
+      "status": "running",
+      "summary": "synthetic project proj-x summary",
+      "tag": "",
+      "updated_utc": "2026-09-18T16:59:21Z"
+    }
+  },
+  "revision": 21,
+  "schema_version": 1,
+  "updated_utc": "2026-09-18T16:59:21Z",
+  "writer": "init"
+}
