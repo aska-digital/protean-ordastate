@@ -14,6 +14,7 @@ import glob
 # allow running as python -m orda2.orda2_cli and as script
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from orda2 import __version__
 from orda2.orda2_store import Store, StoreError, EXIT_CONFLICT, EXIT_LEASE, EXIT_INTEGRITY, EXIT_USAGE, Lock, atomic_write, run_git, git_head, utcnow, parse_utc, slug_valid, scan_for_secrets, assert_no_secrets, check_main_clean
 from orda2.orda2_events import ZERO_HASH, event_hash, read_events, verify_chain, write_events, rechain_segment
 from orda2.orda2_migration import init_home
@@ -937,6 +938,7 @@ def cmd_export(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="orda2")
+    ap.add_argument("--version", action="version", version="orda2 " + __version__)
     ap.add_argument("--home", default=DEFAULT_HOME, help="state home")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -1012,6 +1014,7 @@ def main(argv=None):
     p.set_defaults(fn=cmd_export)
 
     args = ap.parse_args(argv)
+    print("orda2 v1.0.1-beta (beta - owner test track; the safe track is v1.0 orda-state)", file=sys.stderr)
     # dispatch: handle home override style (argparse already does)
     # But init parser defined --home twice; ensure args.home present
     if not hasattr(args, 'home') or not args.home:
