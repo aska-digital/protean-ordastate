@@ -98,11 +98,11 @@ def slug_valid(slug):
 # ---------- Secrets scan (attack 7) ----------
 _SECRET_PATTERNS = [
     (re.compile(r'xox[baprs]-[A-Za-z0-9\-_]+'), 'slack-token (xox*)'),
-    (re.compile(r'sk-[A-Za-z0-9\-_]{15,}'), 'openai-key (sk-)'),
-    (re.compile(r'ghp_[A-Za-z0-9]{15,}'), 'github-pat (ghp_)'),
-    (re.compile(r'github_pat_[A-Za-z0-9_]{15,}'), 'github-pat (github_pat_)'),
-    (re.compile(r'AKIA[0-9A-Z]{16}'), 'aws-key (AKIA)'),
-    (re.compile(r'Bearer\s+[A-Za-z0-9\-_\.=]{10,}'), 'bearer-token (Bearer )'),
+    (re.compile(r'sk-[A-Za-z0-9\-_]{6,}'), 'openai-key (sk-)'),
+    (re.compile(r'ghp_[A-Za-z0-9]{6,}'), 'github-pat (ghp_)'),
+    (re.compile(r'github_pat_[A-Za-z0-9_]{6,}'), 'github-pat (github_pat_)'),
+    (re.compile(r'AKIA[0-9A-Z]{6,}'), 'aws-key (AKIA)'),
+    (re.compile(r'Bearer\s+[A-Za-z0-9\-_\.=]{6,}'), 'bearer-token (Bearer )'),
 ]
 _GENERIC_KEY_RE = re.compile(r'(?i)(api[_-]?key|secret|token)')
 

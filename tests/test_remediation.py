@@ -210,6 +210,172 @@ def test_secret_generic_api_key_refuses():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+
+FAKE_GHP = "ghp_FAKE123"
+FAKE_GITHUB_PAT = "github_pat_FAKE1234567890abcdef123456"
+FAKE_BEARER = "Bearer FAKE1234567890abcdef"
+
+def test_secret_ghp_propose_refuses():
+    tmp = tempfile.mkdtemp()
+    try:
+        home = make_home(tmp, V1_SNAPSHOT)
+        run(["python3", "-m", "orda2.orda2_cli", "worktree", "--home", home, "new", "--session", "evil"])
+        batch = [{"slug": "ghp-secret", "summary": FAKE_GHP}]
+        bf = os.path.join(tmp, "batch.json")
+        json.dump(batch, open(bf, "w"))
+        r = run(["python3", "-m", "orda2.orda2_cli", "propose", "--home", home, "--session", "evil", "--file", bf])
+        assert r.returncode != 0, f"ghp propose should refuse, got {r.returncode}"
+        assert "secrets scan" in r.stderr.lower()
+        assert "ghp_" in r.stderr.lower() or "github-pat" in r.stderr.lower()
+        assert FAKE_GHP not in r.stderr
+        assert "records/ghp-secret.json" in r.stderr or "ghp-secret" in r.stderr
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+def test_secret_ghp_ingest_refuses():
+    tmp = tempfile.mkdtemp()
+    try:
+        home = make_home(tmp, V1_SNAPSHOT)
+        batch = [{"slug": "ghp-ingest", "summary": FAKE_GHP}]
+        bf = os.path.join(tmp, "ingest.json")
+        json.dump(batch, open(bf, "w"))
+        r = run(["python3", "-m", "orda2.orda2_cli", "ingest", "--home", home, "--session", "ingest", "--file", bf])
+        assert r.returncode != 0
+        assert "secrets scan" in r.stderr.lower()
+        assert FAKE_GHP not in r.stderr
+        assert "ghp" in r.stderr.lower()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+def test_secret_github_pat_propose_refuses():
+    tmp = tempfile.mkdtemp()
+    try:
+        home = make_home(tmp, V1_SNAPSHOT)
+        run(["python3", "-m", "orda2.orda2_cli", "worktree", "--home", home, "new", "--session", "evil"])
+        batch = [{"slug": "github-pat-secret", "summary": FAKE_GITHUB_PAT}]
+        bf = os.path.join(tmp, "batch.json")
+        json.dump(batch, open(bf, "w"))
+        r = run(["python3", "-m", "orda2.orda2_cli", "propose", "--home", home, "--session", "evil", "--file", bf])
+        assert r.returncode != 0
+        assert "secrets scan" in r.stderr.lower()
+        assert "github_pat" in r.stderr.lower() or "github-pat" in r.stderr.lower()
+        assert FAKE_GITHUB_PAT not in r.stderr
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+def test_secret_github_pat_ingest_refuses():
+    tmp = tempfile.mkdtemp()
+    try:
+        home = make_home(tmp, V1_SNAPSHOT)
+        batch = [{"slug": "github-pat-ingest", "summary": FAKE_GITHUB_PAT}]
+        bf = os.path.join(tmp, "ingest.json")
+        json.dump(batch, open(bf, "w"))
+        r = run(["python3", "-m", "orda2.orda2_cli", "ingest", "--home", home, "--session", "ingest", "--file", bf])
+        assert r.returncode != 0
+        assert "secrets scan" in r.stderr.lower()
+        assert FAKE_GITHUB_PAT not in r.stderr
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+def test_secret_bearer_propose_refuses():
+    tmp = tempfile.mkdtemp()
+    try:
+        home = make_home(tmp, V1_SNAPSHOT)
+        run(["python3", "-m", "orda2.orda2_cli", "worktree", "--home", home, "new", "--session", "evil"])
+        batch = [{"slug": "bearer-secret", "summary": FAKE_BEARER}]
+        bf = os.path.join(tmp, "batch.json")
+        json.dump(batch, open(bf, "w"))
+        r = run(["python3", "-m", "orda2.orda2_cli", "propose", "--home", home, "--session", "evil", "--file", bf])
+        assert r.returncode != 0
+        assert "secrets scan" in r.stderr.lower()
+        assert "bearer" in r.stderr.lower()
+        assert "FAKE123" not in r.stderr  # value redacted
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+def test_secret_bearer_ingest_refuses():
+    tmp = tempfile.mkdtemp()
+    try:
+        home = make_home(tmp, V1_SNAPSHOT)
+        batch = [{"slug": "bearer-ingest", "summary": FAKE_BEARER}]
+        bf = os.path.join(tmp, "ingest.json")
+        json.dump(batch, open(bf, "w"))
+        r = run(["python3", "-m", "orda2.orda2_cli", "ingest", "--home", home, "--session", "ingest", "--file", bf])
+        assert r.returncode != 0
+        assert "secrets scan" in r.stderr.lower()
+        assert "bearer" in r.stderr.lower()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+def test_secret_sk_ingest_refuses():
+    tmp = tempfile.mkdtemp()
+    try:
+        home = make_home(tmp, V1_SNAPSHOT)
+        batch = [{"slug": "sk-ingest", "summary": FAKE_SK}]
+        bf = os.path.join(tmp, "ingest.json")
+        json.dump(batch, open(bf, "w"))
+        r = run(["python3", "-m", "orda2.orda2_cli", "ingest", "--home", home, "--session", "ingest", "--file", bf])
+        assert r.returncode != 0
+        assert "secrets scan" in r.stderr.lower()
+        assert "sk-" in r.stderr.lower() or "openai" in r.stderr.lower()
+        assert FAKE_SK not in r.stderr
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+def test_secret_akia_ingest_refuses():
+    tmp = tempfile.mkdtemp()
+    try:
+        home = make_home(tmp, V1_SNAPSHOT)
+        batch = [{"slug": "akia-ingest", "summary": FAKE_AKIA}]
+        bf = os.path.join(tmp, "ingest.json")
+        json.dump(batch, open(bf, "w"))
+        r = run(["python3", "-m", "orda2.orda2_cli", "ingest", "--home", home, "--session", "ingest", "--file", bf])
+        assert r.returncode != 0
+        assert "secrets scan" in r.stderr.lower()
+        assert "akia" in r.stderr.lower()
+        assert FAKE_AKIA not in r.stderr
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+def test_secret_short_qa_tokens_propose_and_ingest_refuses():
+    # Exact QA short tokens: sk-FAKE123 and ghp_FAKE123 must be refused at both propose and ingest
+    for token, label in [("sk-FAKE123", "sk-"), ("ghp_FAKE123", "ghp_")]:
+        for mode in ["propose", "ingest"]:
+            tmp = tempfile.mkdtemp()
+            try:
+                home = make_home(tmp, V1_SNAPSHOT)
+                if mode == "propose":
+                    run(["python3", "-m", "orda2.orda2_cli", "worktree", "--home", home, "new", "--session", "evil"])
+                    batch = [{"slug": "qa-short", "summary": token}]
+                    bf = os.path.join(tmp, "batch.json")
+                    json.dump(batch, open(bf, "w"))
+                    r = run(["python3", "-m", "orda2.orda2_cli", "propose", "--home", home, "--session", "evil", "--file", bf])
+                else:
+                    batch = [{"slug": "qa-short", "summary": token}]
+                    bf = os.path.join(tmp, "ingest.json")
+                    json.dump(batch, open(bf, "w"))
+                    r = run(["python3", "-m", "orda2.orda2_cli", "ingest", "--home", home, "--session", "ingest", "--file", bf])
+                assert r.returncode != 0, f"{label} {mode} should refuse {token}"
+                assert "secrets scan" in r.stderr.lower()
+                assert token not in r.stderr
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+def test_secret_generic_ingest_refuses():
+    tmp = tempfile.mkdtemp()
+    try:
+        home = make_home(tmp, V1_SNAPSHOT)
+        batch = [{"slug": "generic-ingest", "summary": "hi", "api_key": "FAKEGENERIC1234567890ABCDEF"}]
+        bf = os.path.join(tmp, "ingest.json")
+        json.dump(batch, open(bf, "w"))
+        r = run(["python3", "-m", "orda2.orda2_cli", "ingest", "--home", home, "--session", "ingest", "--file", bf])
+        assert r.returncode != 0
+        assert "secrets scan" in r.stderr.lower()
+        assert "generic-secret" in r.stderr.lower()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---- Attack 8: main-write bypass ----
 
 def test_dirty_main_propose_refuses():
