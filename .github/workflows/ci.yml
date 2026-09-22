@@ -3,7 +3,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [orda2/prototype]
+    branches: [orda2/**]
 
 jobs:
   test:
