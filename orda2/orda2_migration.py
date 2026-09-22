@@ -17,6 +17,11 @@ def init_home(home, from_v1=None):
     store = Store(home)
     store.ensure_dirs()
 
+    # Runtime debris that must never enter the store's git surface.
+    gi_path = os.path.join(home, ".gitignore")
+    if not os.path.exists(gi_path):
+        atomic_write(gi_path, "worktrees/\n.lock\n")
+
     # If already initialized, idempotent
     if os.path.exists(os.path.join(home, "state.json")) and os.path.exists(os.path.join(home, "events.jsonl")):
         # already done, but ensure git has files
@@ -63,20 +68,26 @@ def init_home(home, from_v1=None):
                 tmp_projects[e["project"]] = rec
         projects = tmp_projects
 
-    # Write records/<slug>.json with rev= v1_revision uniform, head_event = last hash touching it (or v1_head_hash)
+    # Write records/<slug>.json.
+    # rev is seeded to the v1 revision that last touched each record (the
+    # per-record CAS base); head_event is that event's hash. Records never
+    # touched by a project event fall back to the v1 head revision/hash.
+    last_rev = {}
+    last_hash = {}
+    for e in v1_events:
+        if e.get("project"):
+            last_rev[e["project"]] = int(e.get("revision", 0) or 0)
+            if e.get("hash"):
+                last_hash[e["project"]] = e["hash"]
     record_count = 0
     import_map = {}
     for slug, rec in sorted(projects.items()):
         # enrich with rev/head_event
         enriched = dict(rec)
         enriched["slug"] = slug
-        enriched["rev"] = int(v1_revision) if v1_revision else 1
+        enriched["rev"] = last_rev.get(slug) or (int(v1_revision) if v1_revision else 1)
         # find last event touching this slug
-        head = v1_head_hash
-        for e in reversed(v1_events):
-            if e.get("project") == slug:
-                head = e.get("hash", head)
-                break
+        head = last_hash.get(slug, v1_head_hash)
         enriched["head_event"] = head
         enriched["updated_utc"] = enriched.get("updated_utc") or utcnow()
         enriched["writer"] = enriched.get("writer") or enriched.get("last_writer") or "v1-import"

@@ -1,25 +1,20 @@
-# Owner test sheet: v1.0 and v1.0.1 beta
+# Owner test sheet: v1.0 (safe track) and v2.0 (cutover track)
 
-Two tracks. v1.0 is the safe track. v1.0.1 beta is the test track. The beta is not stable.
+Two tracks. v1.0 is the safe track and stays verbatim. v2.0 is the
+git-substrate multi-writer store (`orda2`).
 
 Setup (one time). Run from inside the clone (or set an alias):
 
 ```
 git clone https://github.com/aska-digital/protean-ordastate.git ~/protean-ordastate
-python3 -m orda2.orda2_cli --version        # prints: orda2 1.0.1-beta
+python3 -m orda2.orda2_cli --version        # prints: orda2 2.0.0 (git-substrate multi-writer; exit codes 0/2/3/4/5)
 ```
-
-Note: after the marking change lands, EVERY orda2 command also prints one stderr line first before its normal output:
-
-`orda2 v1.0.1-beta (beta - owner test track; the safe track is v1.0 orda-state)`
-
-That line is expected. It is not an error.
 
 ## 1. Read commands, side by side
 
 Both read only. Neither changes anything. Both exit 0.
 
-v1.0.1 beta (pass --home on every orda2 command; home already initialized, 177 events):
+v2.0 (pass --home on every orda2 command; home holds the migrated store):
 
 ```
 python3 -m orda2.orda2_cli brief --home ~/.hermes/eldunari/nexus/state/orda2
@@ -31,7 +26,7 @@ v1.0 (never modified by the beta work):
 python3 ~/.hermes/eldunari/nexus/state/orda/tool/orda_state.py brief
 ```
 
-## 2. Write one real thing (beta track only)
+## 2. Write one real thing (v2.0 track only)
 
 Home for every command below: `~/.hermes/eldunari/nexus/state/orda2`. Run in this order:
 
@@ -109,7 +104,7 @@ To go back to the safe track at any time, use only the v1.0 CLI:
 python3 ~/.hermes/eldunari/nexus/state/orda/tool/orda_state.py brief
 ```
 
-The safe track was never modified by the beta work — same files, same revision numbering, nothing renamed. Rollback loses nothing; stop using the beta commands and everything that mattered is still in v1.0. (Reads on the beta track stay available for comparison.)
+The safe track was never modified by the v2.0 work — same files, same revision numbering, nothing renamed. Rollback loses nothing; stop using the v2.0 commands and everything that mattered is still in v1.0. (Reads on the v2.0 track stay available for comparison.)
 
 ## 5. Report (3 lines per command)
 

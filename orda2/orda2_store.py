@@ -171,6 +171,38 @@ def check_main_clean(home):
         raise StoreError(EXIT_USAGE, "main is dirty (%s) — direct writes detected; main must be clean (no untracked/modified records/, events/, state/) before mutating operations; discard or commit debris then retry" % preview)
 
 
+# ---------- Store/host boundary (J13) ----------
+def check_store_boundary(home):
+    """Fail (message) when an ancestor git repo sees the store path.
+
+    Returns None when the boundary holds: either no ancestor repo exists, or
+    the ancestor's `git status --porcelain -- <relpath>` is clean (the ignore
+    rule is in force). Returns a problem string otherwise (verify exit 5).
+    """
+    home = os.path.abspath(home)
+    cur = os.path.dirname(home)
+    for _ in range(8):
+        if os.path.isdir(os.path.join(cur, ".git")):
+            rel = os.path.relpath(home, cur)
+            if rel.startswith(".."):
+                return None
+            r = run_git(["status", "--porcelain", "--", rel], cwd=cur, check=False)
+            if r.returncode != 0:
+                return None  # cannot prove a breach; other checks own failures
+            lines = [l for l in r.stdout.splitlines() if l.strip()]
+            if lines:
+                preview = "; ".join(l.strip() for l in lines[:3])
+                return ("store/host boundary breach (J13): enclosing repo tracks the store path "
+                        "(%s) — the ignore rule is missing or regressed; "
+                        "verify exit 5 until the enclosing repo ignores it" % preview)
+            return None
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+    return None
+
+
 # ---------- Store class (main worktree) ----------
 class Store:
     def __init__(self, home):
@@ -452,6 +484,14 @@ class Store:
                 problems.append("git fsck failed: %s — integrity failure (possible corrupt git object)" % r.stderr.strip()[:500])
         except Exception as e:
             problems.append("git fsck error: %s — integrity failure" % e)
+        # J13 store/host boundary: the store is self-contained. If the home
+        # sits inside an ancestor git repo (e.g. Eldunari) that repo must not
+        # see the store path — otherwise the foreign write cadence leaks into
+        # it (missing ignore rule). No home-directory value is embedded here:
+        # the ancestor is discovered by walking up from home.
+        boundary = check_store_boundary(self.home)
+        if boundary:
+            problems.append(boundary)
         return {"ok": not problems, "problems": problems, "events": len(events)}
 
     def reconcile(self, session="reconcile"):

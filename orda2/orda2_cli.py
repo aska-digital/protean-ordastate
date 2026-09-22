@@ -14,7 +14,7 @@ import glob
 # allow running as python -m orda2.orda2_cli and as script
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from orda2 import __version__
+from orda2 import __version__, STORE_MODEL, EXIT_CONTRACT
 from orda2.orda2_store import Store, StoreError, EXIT_CONFLICT, EXIT_LEASE, EXIT_INTEGRITY, EXIT_USAGE, Lock, atomic_write, run_git, git_head, utcnow, parse_utc, slug_valid, scan_for_secrets, assert_no_secrets, check_main_clean
 from orda2.orda2_events import ZERO_HASH, event_hash, read_events, verify_chain, write_events, rechain_segment
 from orda2.orda2_migration import init_home
@@ -26,16 +26,52 @@ def require_home(args):
     return os.path.abspath(os.path.expanduser(args.home))
 
 
+def _v1_head_hash(from_v1):
+    """Head hash of a v1 snapshot's events.jsonl ('' when absent)."""
+    try:
+        evs = read_events(os.path.join(from_v1, "events.jsonl"))
+        return evs[-1]["hash"] if evs else ""
+    except Exception:
+        return ""
+
+
+def _same_source_noop(home, from_v1):
+    """True when home already holds a complete import of exactly this v1 head.
+
+    Idempotency (J9/D3): re-running init over a complete store from the SAME
+    v1 head is a no-op. Any other non-empty target is refused (M2) so the
+    archive step can never be skipped.
+    """
+    try:
+        imp = json.load(open(os.path.join(home, "archive", "v1-import.json")))
+        state = json.load(open(os.path.join(home, "state.json")))
+    except Exception:
+        return False
+    if imp.get("record_count") != len(state.get("projects", {})):
+        return False
+    if not imp.get("v1_head_hash"):
+        return False
+    return imp["v1_head_hash"] == _v1_head_hash(from_v1) != ""
+
+
 def cmd_init(args):
     home = require_home(args)
     from_v1 = os.path.abspath(os.path.expanduser(args.from_v1)) if args.from_v1 else None
     if from_v1 and not os.path.isdir(from_v1):
         raise StoreError(EXIT_USAGE, "from-v1 not found: %s" % from_v1)
-    # idempotency guard
-    if os.path.exists(os.path.join(home, "state.json")) and os.path.isdir(os.path.join(home, ".git")):
-        # check if already imported same v1
-        print(json.dumps({"home": home, "already": True, "note": "already initialized"}))
-        return 0
+    if os.path.isdir(home) and os.listdir(home):
+        # Non-empty target home: only the idempotent same-source re-run
+        # passes; everything else is refused so a stale rehearsal store can
+        # never be silently clobbered (M2).
+        is_store = os.path.exists(os.path.join(home, "state.json")) and os.path.isdir(os.path.join(home, ".git"))
+        if is_store and from_v1 and _same_source_noop(home, from_v1):
+            print(json.dumps({"home": home, "already": True, "note": "already initialized from this v1 head (idempotent no-op)"}))
+            return 0
+        stamp = "$(date -u +%Y%m%dT%H%M%SZ)"
+        raise StoreError(EXIT_USAGE,
+            "target home %s is non-empty — refusing to overwrite (fresh genesis only). "
+            "Archive first, never delete: mv %s %s.rehearsal-%s "
+            "then re-run init --from-v1 against the live v1 home." % (home, home, home, stamp))
     result = init_home(home, from_v1=from_v1)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -938,7 +974,8 @@ def cmd_export(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="orda2")
-    ap.add_argument("--version", action="version", version="orda2 " + __version__)
+    ap.add_argument("--version", action="version",
+                      version="orda2 %s (%s; exit codes %s)" % (__version__, STORE_MODEL, EXIT_CONTRACT))
     ap.add_argument("--home", default=DEFAULT_HOME, help="state home")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -1014,7 +1051,6 @@ def main(argv=None):
     p.set_defaults(fn=cmd_export)
 
     args = ap.parse_args(argv)
-    print("orda2 v1.0.1-beta (beta - owner test track; the safe track is v1.0 orda-state)", file=sys.stderr)
     # dispatch: handle home override style (argparse already does)
     # But init parser defined --home twice; ensure args.home present
     if not hasattr(args, 'home') or not args.home:

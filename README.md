@@ -1,6 +1,10 @@
-# Orda State v2 prototype — git-substrate multi-writer
+# Orda State v2 — git-substrate multi-writer store (`orda2` 2.0.0)
 
-Prototype per `leo-decision-memo.md` §11 (branch `orda2/prototype`). Stdlib + git only, no server, no network at runtime. All data synthetic under `sandbox/`; live store untouched.
+Production cutover from the v1 single-writer store, per the LOCKED
+cutover architecture (lane `orda-cutover-v2-20260922`). Stdlib + git only,
+no server, no network at runtime. All tests and rehearsals use synthetic
+homes under temp dirs; the live store is never touched by this repo's
+tooling except through the operator runbook below.
 
 ## What it is
 
@@ -12,7 +16,7 @@ Prototype per `leo-decision-memo.md` §11 (branch `orda2/prototype`). Stdlib + g
 
 ```
 orda2/           orda2_cli.py, orda2_store.py, orda2_events.py, orda2_projection.py, orda2_migration.py, orda2_ingest.py
-tests/           test_concurrency.py, test_conflict.py, test_crash_recovery.py, test_migration.py, test_reader_roundtrip.py, test_ingest.py, test_remediation.py
+tests/           test_concurrency.py, test_conflict.py, test_crash_recovery.py, test_migration.py, test_reader_roundtrip.py, test_ingest.py, test_remediation.py, test_cutover.py
 sandbox/         v1-snapshot/ (synthetic 8-record rev-21), fixtures/links25.json (25 items, one malformed, one duplicate), fixtures/v1-100/ (100-record rev-126), demo/run.sh
 ```
 
@@ -62,7 +66,12 @@ The prototype has no server; enforcement is CLI-level + git. The filesystem reta
 
 ## Recorded output (this branch)
 
-Tests: `24 passed` (pytest). Demo: exits 0; final lines include `=== DEMO COMPLETE ===` plus `verify ok`, `projection matches reconcile`, `export bundle carries no transcript/secrets`, `git fsck ok`. See `sandbox/demo/run.sh` output for the exact conflict message:
+Tests: `43 passed` (pytest: the 38-test prototype suite plus 5 cutover-gate
+tests in `tests/test_cutover.py` — live-shape genesis parity, init-refuses-
+non-empty, idempotent re-run, `--version` contract, J13 boundary guard).
+Demo: exits 0; final lines include `=== DEMO COMPLETE ===` plus `verify ok`,
+`projection matches reconcile`, `export bundle carries no transcript/secrets`,
+`git fsck ok`. See `sandbox/demo/run.sh` output for the exact conflict message:
 
 ```
 CONFLICT orda/prop/sess-b/1 vs main — record: proj-x
@@ -79,3 +88,81 @@ Refused: same-record concurrent change. Never auto-merged. See brief → Unresol
 - Volume bound: thousands of small JSON files fine for git; GB-scale blobs would need Hazen F-flip #3 (SQLite fallback).
 - `rerere` is enabled but not exercised beyond recurring same-record conflict; seat takeover epoch bump is minimal (file + event).
 - Projection regeneration is O(events-in-proposal + records) ~ O(100) per merge; full chain `verify` is O(n) with n=~100 in prototype.
+
+## Cutover runbook (v1 → v2, operator lane only)
+
+Cutover itself is an owner decision, executed on the live machine by the
+cutover lane — never by this tool unattended. The sequence below is the
+locked migration (§5 of the cutover architecture). Store paths are the
+operator machine's canonical homes.
+
+```sh
+# 1. Freeze point (owner-approved moment). Record v1 verify + manifest:
+orda-state verify  # v1 CLI against the live home, must exit 0
+sha256sum ~/.hermes/eldunari/nexus/state/orda/state.json \
+          ~/.hermes/eldunari/nexus/state/orda/events.jsonl \
+          ~/.hermes/eldunari/nexus/state/orda/seat.json > archive/v1-precutover-manifest.json
+
+# 2. Archive the stale rehearsal store — never delete it:
+mv ~/.hermes/eldunari/nexus/state/orda2 ~/.hermes/eldunari/nexus/state/orda2-rehearsal-$(date -u +%Y%m%dT%H%M%SZ)
+
+# 3. Fresh genesis from the CURRENT live v1 (init refuses a non-empty home, exit 2):
+python3 -m orda2.orda2_cli init --home ~/.hermes/eldunari/nexus/state/orda2 \
+    --from-v1 ~/.hermes/eldunari/nexus/state/orda
+
+# 4. Verify (must exit 0):
+python3 -m orda2.orda2_cli verify --home ~/.hermes/eldunari/nexus/state/orda2
+
+# 5. Parity proof (Shaka Q1): 183/183 slug-set equality, field-by-field
+#    payload equality, event parity 335 + 1 genesis = 336, v1 checksums
+#    byte-identical vs the step-1 manifest.
+```
+
+Recorded rehearsal output (synthetic v1 replica at the live shape —
+335 events / 183 records; the live store was not involved):
+
+```
+$ python3 -m orda2.orda2_cli init --home <store> --from-v1 <v1-replica>
+{
+  "record_count": 183,
+  "v1_head_hash": "40a62e66deadbcba05c17d2a1a14e0824fbbd8c3ac55013f1588bd8ff1905af2",
+  "v1_revision": 335
+}
+
+$ python3 -m orda2.orda2_cli verify --home <store>
+{
+  "events": 336,
+  "ok": true,
+  "problems": []
+}
+
+$ parity check
+slug-set 183/183 equal
+field mismatches: 0
+v2 events: 336
+```
+
+(`<store>` / `<v1-replica>` redact the rehearsal's temp paths; all other
+bytes verbatim. Re-running the import over the complete store is a no-op:
+`{"already": true, ...}`, events unchanged. A crash mid-import is repaired
+by archive-and-rerun — in-place delta merge is not supported.)
+
+## Rollback (one command, whole-cutover undo)
+
+```sh
+mv ~/.hermes/eldunari/nexus/state/orda2 ~/.hermes/eldunari/nexus/state/orda2.archived-$(date -u +%Y%m%dT%H%M%SZ) && git -C ~/.hermes/eldunari revert --no-edit <CUTOVER_ELDUNARI_COMMIT>
+```
+
+where `<CUTOVER_ELDUNARI_COMMIT>` is the single Eldunari commit adding the
+gitignore line + STATE.md pointer. Post-rollback proof: `orda-state verify`
+exits 0 and sha256 comparison against the pre-cutover manifest passes.
+Consumers resume the v1 command block; v1's seat machinery is intact. Any
+v2-only work is re-proposed to v1 by hand (expected zero at cutover).
+
+## Release ordering
+
+The `v2.0.0` annotated tag + visible GitHub release land only after Team
+Review merge (a later lane, §M read-back). The release notes must reference
+the §J amendment PR on `aska-digital/protean-control-plane`: the release
+must not ship while the old single-writer §J law still reads as current —
+whether that PR merges before or after is the owner's call.
