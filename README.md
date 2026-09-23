@@ -167,13 +167,14 @@ the §J amendment PR on `aska-digital/protean-control-plane`: the release
 must not ship while the old single-writer §J law still reads as current —
 whether that PR merges before or after is the owner's call.
 
-## Wording amendment — locked architecture decision record (2026-09-23)
+## Wording amendment. Locked architecture decision record (2026-09-23)
 
-This is a documentation-only clarification to the locked cutover architecture;
-it changes no behavior, code, or invariant. During fresh genesis, `rev` is
+This is a documentation-only clarification to the locked cutover architecture.
+It changes no behavior, code, or invariant. During fresh genesis, `rev` is
 seeded to the v1 revision that last touched each record. For the three live
-records with no provenance event, the fallback is `rev :=` that record's v1
-`revision` field. In the v2 record format, J3 is therefore: one file per
-record, `records/<slug>.json`, carrying the v1 payload plus `rev`,
-`head_event`, and the additive `writer` field. Genesis, CAS, conflict
-semantics, and the parity exclusions for `rev` and `head_event` are unchanged.
+records with no provenance event, the fallback is `rev :=` the v1 head revision
+value, or `1` when no v1 revision value exists. In the v2 record format, J3 is
+therefore: one file per record, `records/<slug>.json`, carrying the v1 payload
+plus `rev`, `head_event`, and the additive `writer` field. Genesis, CAS,
+conflict semantics, and the parity exclusions for `rev` and `head_event` are
+unchanged.
