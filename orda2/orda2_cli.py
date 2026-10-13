@@ -574,6 +574,13 @@ def cmd_review(args):
 
 
 def cmd_merge(args):
+    # Hold the merge lease, cleanliness gate and record CAS under the same
+    # lock as the write. A waiter must re-check against the previous merge.
+    with Lock(require_home(args)):
+        return _cmd_merge_locked(args)
+
+
+def _cmd_merge_locked(args):
     home = require_home(args)
     session = args.session
     proposal_branch = args.proposal
@@ -648,50 +655,49 @@ def cmd_merge(args):
         os.makedirs(os.path.join(home, "proposal-conflicts"), exist_ok=True)
         atomic_write(os.path.join(home, "proposal-conflicts", "%s.json" % cid), json.dumps(conflict_record, indent=2, sort_keys=True) + "\n")
         # append conflict event to main chain
-        with Lock(home):
-            events = read_events(store.events_path)
-            prev = events[-1]["hash"] if events else ZERO_HASH
-            seq = (events[-1]["seq"] + 1) if events else 1
-            last_rev = events[-1]["revision"] if events else 0
-            ev = {"seq": seq, "prev_hash": prev, "revision": last_rev + 1, "ts": utcnow(), "writer": session, "kind": "conflict", "project": c["slug"], "data": conflict_record, "note": "conflict refused %s" % proposal_branch}
-            tmp = dict(ev); tmp.pop("hash", None)
-            ev["hash"] = event_hash(prev, tmp)
-            with open(store.events_path, "a") as f:
-                f.write(json.dumps(ev, sort_keys=True) + "\n")
-                f.flush(); os.fsync(f.fileno())
-            # update state revision to last_rev+1 so verify stays consistent
-            if os.path.exists(store.state_path):
-                try:
-                    state = json.load(open(store.state_path))
-                    state["revision"] = ev["revision"]
-                    state["updated_utc"] = ev["ts"]
-                    atomic_write(store.state_path, json.dumps(state, indent=2, sort_keys=True) + "\n")
-                except Exception:
-                    pass
-            # regenerate projection to surface conflict
+        events = read_events(store.events_path)
+        prev = events[-1]["hash"] if events else ZERO_HASH
+        seq = (events[-1]["seq"] + 1) if events else 1
+        last_rev = events[-1]["revision"] if events else 0
+        ev = {"seq": seq, "prev_hash": prev, "revision": last_rev + 1, "ts": utcnow(), "writer": session, "kind": "conflict", "project": c["slug"], "data": conflict_record, "note": "conflict refused %s" % proposal_branch}
+        tmp = dict(ev); tmp.pop("hash", None)
+        ev["hash"] = event_hash(prev, tmp)
+        with open(store.events_path, "a") as f:
+            f.write(json.dumps(ev, sort_keys=True) + "\n")
+            f.flush(); os.fsync(f.fileno())
+        # update state revision to last_rev+1 so verify stays consistent
+        if os.path.exists(store.state_path):
             try:
-                from orda2.orda2_projection import write_projection
-                write_projection(home)
+                state = json.load(open(store.state_path))
+                state["revision"] = ev["revision"]
+                state["updated_utc"] = ev["ts"]
+                atomic_write(store.state_path, json.dumps(state, indent=2, sort_keys=True) + "\n")
             except Exception:
                 pass
-            # commit conflict record + events + state
-            try:
-                run_git(["add", "proposal-conflicts", "events.jsonl", "state.json", "projection"], cwd=home, check=False)
-                st = run_git(["status", "--porcelain"], cwd=home, check=False)
-                if st.stdout.strip():
-                    run_git(["commit", "-m", "conflict: %s vs main record %s" % (proposal_branch, c["slug"])], cwd=home)
-            except Exception:
-                pass
-            # verdict file
-            os.makedirs(os.path.join(home, "reviews"), exist_ok=True)
-            atomic_write(os.path.join(home, "reviews", "%s.json" % cid), json.dumps({"proposal": proposal_branch, "verdict": "conflict", "conflict": conflict_record, "gate": "G3"}, indent=2, sort_keys=True) + "\n")
-            try:
-                run_git(["add", "reviews"], cwd=home, check=False)
-                st = run_git(["status", "--porcelain", "reviews/%s.json" % cid], cwd=home, check=False)
-                if st.stdout.strip():
-                    run_git(["commit", "-m", "verdict conflict %s" % cid], cwd=home)
-            except Exception:
-                pass
+        # regenerate projection to surface conflict
+        try:
+            from orda2.orda2_projection import write_projection
+            write_projection(home)
+        except Exception:
+            pass
+        # commit conflict record + events + state
+        try:
+            run_git(["add", "proposal-conflicts", "events.jsonl", "state.json", "projection"], cwd=home, check=False)
+            st = run_git(["status", "--porcelain"], cwd=home, check=False)
+            if st.stdout.strip():
+                run_git(["commit", "-m", "conflict: %s vs main record %s" % (proposal_branch, c["slug"])], cwd=home)
+        except Exception:
+            pass
+        # verdict file
+        os.makedirs(os.path.join(home, "reviews"), exist_ok=True)
+        atomic_write(os.path.join(home, "reviews", "%s.json" % cid), json.dumps({"proposal": proposal_branch, "verdict": "conflict", "conflict": conflict_record, "gate": "G3"}, indent=2, sort_keys=True) + "\n")
+        try:
+            run_git(["add", "reviews"], cwd=home, check=False)
+            st = run_git(["status", "--porcelain", "reviews/%s.json" % cid], cwd=home, check=False)
+            if st.stdout.strip():
+                run_git(["commit", "-m", "verdict conflict %s" % cid], cwd=home)
+        except Exception:
+            pass
 
         # human-visible exact message per spec §4/§11
         msg = ("CONFLICT %s vs main — record: %s\n"
@@ -738,151 +744,150 @@ def cmd_merge(args):
     # crash injection hooks
     crash_after = os.environ.get("ORDA2_CRASH_AFTER", "")
 
-    with Lock(home):
-        main_events = read_events(store.events_path)
-        main_head_hash = main_events[-1]["hash"] if main_events else ZERO_HASH
-        main_head_seq = (main_events[-1]["seq"] + 1) if main_events else 1
-        main_last_rev = main_events[-1]["revision"] if main_events else 0
+    main_events = read_events(store.events_path)
+    main_head_hash = main_events[-1]["hash"] if main_events else ZERO_HASH
+    main_head_seq = (main_events[-1]["seq"] + 1) if main_events else 1
+    main_last_rev = main_events[-1]["revision"] if main_events else 0
 
-        # rechain segment onto current main head
-        re_chained = rechain_segment(segment, main_head_hash, main_head_seq)
-        # renumber revision sequentially (per-event revision = last_rev + idx +1)
-        for idx, e in enumerate(re_chained):
-            e["revision"] = main_last_rev + idx + 1
-            # recompute hash because revision changed
-            prev_h = re_chained[idx-1]["hash"] if idx > 0 else main_head_hash
-            e["prev_hash"] = prev_h
-            tmp = dict(e); tmp.pop("hash", None)
-            e["hash"] = event_hash(prev_h, tmp)
+    # rechain segment onto current main head
+    re_chained = rechain_segment(segment, main_head_hash, main_head_seq)
+    # renumber revision sequentially (per-event revision = last_rev + idx +1)
+    for idx, e in enumerate(re_chained):
+        e["revision"] = main_last_rev + idx + 1
+        # recompute hash because revision changed
+        prev_h = re_chained[idx-1]["hash"] if idx > 0 else main_head_hash
+        e["prev_hash"] = prev_h
+        tmp = dict(e); tmp.pop("hash", None)
+        e["hash"] = event_hash(prev_h, tmp)
 
-        # Stage 1: splice events into main events.jsonl
-        with open(store.events_path, "a") as f:
-            for e in re_chained:
-                f.write(json.dumps(e, sort_keys=True) + "\n")
-            f.flush(); os.fsync(f.fileno())
+    # Stage 1: splice events into main events.jsonl
+    with open(store.events_path, "a") as f:
+        for e in re_chained:
+            f.write(json.dumps(e, sort_keys=True) + "\n")
+        f.flush(); os.fsync(f.fileno())
 
-        if crash_after == "splice":
-            print("CRASH injected after splice", file=sys.stderr)
-            os._exit(1)
+    if crash_after == "splice":
+        print("CRASH injected after splice", file=sys.stderr)
+        os._exit(1)
 
-        # Stage 2: move records / inbox from proposal branch into main worktree
-        # Use git merge --no-commit approach or cherry-pick files via git show
-        # Simplest: git checkout branch -- records inbox etc. then commit
-        # For work kind, copy records; for ingest, copy inbox + quarantine
-        try:
-            # get list of files changed in proposal vs its base
-            base_commit = manifest.get("base_main_commit")
-            # checkout the proposal's records/inbox into main
-            # Use git checkout <branch> -- records inbox
-            # But to avoid overwriting unrelated, we checkout specific paths
-            # First, get diff files
-            r = run_git(["diff", "--name-only", base_commit, proposal_branch], cwd=home, check=False)
-            files_to_checkout = [line.strip() for line in r.stdout.splitlines() if line.strip() and (line.strip().startswith("records/") or line.strip().startswith("inbox/"))]
-            for fp in files_to_checkout:
-                # git show branch:fp > home/fp
-                rr = run_git(["show", "%s:%s" % (proposal_branch, fp)], cwd=home, check=False)
-                if rr.returncode == 0:
-                    dest = os.path.join(home, fp)
-                    os.makedirs(os.path.dirname(dest), exist_ok=True)
-                    # For records, bump rev
-                    if fp.startswith("records/"):
-                        try:
-                            rec = json.loads(rr.stdout)
-                            # bump rev to new value (main_last_rev relative)
-                            # Find which event touches this slug
-                            slug = fp[len("records/"):-len(".json")]
-                            # latest event for this slug in re_chained
-                            # rev should be revision of that event
-                            rev = None
-                            for ev in reversed(re_chained):
-                                if ev.get("project") == slug:
-                                    rev = ev["revision"]
-                                    break
-                            if rev is not None:
-                                rec["rev"] = rev
-                                rec["head_event"] = next((ev["hash"] for ev in reversed(re_chained) if ev.get("project")==slug), rec.get("head_event"))
-                            atomic_write(dest, json.dumps(rec, indent=2, sort_keys=True) + "\n")
-                        except Exception:
-                            atomic_write(dest, rr.stdout if rr.stdout.endswith("\n") else rr.stdout + "\n")
-                    else:
-                        atomic_write(dest, rr.stdout if rr.stdout.endswith("\n") else rr.stdout + "\n")
-            # Also need to update state.json projects from new records
-            state = json.load(open(store.state_path))
-            for fp in files_to_checkout:
+    # Stage 2: move records / inbox from proposal branch into main worktree
+    # Use git merge --no-commit approach or cherry-pick files via git show
+    # Simplest: git checkout branch -- records inbox etc. then commit
+    # For work kind, copy records; for ingest, copy inbox + quarantine
+    try:
+        # get list of files changed in proposal vs its base
+        base_commit = manifest.get("base_main_commit")
+        # checkout the proposal's records/inbox into main
+        # Use git checkout <branch> -- records inbox
+        # But to avoid overwriting unrelated, we checkout specific paths
+        # First, get diff files
+        r = run_git(["diff", "--name-only", base_commit, proposal_branch], cwd=home, check=False)
+        files_to_checkout = [line.strip() for line in r.stdout.splitlines() if line.strip() and (line.strip().startswith("records/") or line.strip().startswith("inbox/"))]
+        for fp in files_to_checkout:
+            # git show branch:fp > home/fp
+            rr = run_git(["show", "%s:%s" % (proposal_branch, fp)], cwd=home, check=False)
+            if rr.returncode == 0:
+                dest = os.path.join(home, fp)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                # For records, bump rev
                 if fp.startswith("records/"):
-                    slug = fp[len("records/"):-len(".json")]
-                    rec = json.load(open(os.path.join(home, fp)))
-                    state["projects"][slug] = rec
-            # Also for inbox kind, inbox already copied
-        except Exception as e:
-            print("records-move failed: %s" % e, file=sys.stderr)
-            raise
+                    try:
+                        rec = json.loads(rr.stdout)
+                        # bump rev to new value (main_last_rev relative)
+                        # Find which event touches this slug
+                        slug = fp[len("records/"):-len(".json")]
+                        # latest event for this slug in re_chained
+                        # rev should be revision of that event
+                        rev = None
+                        for ev in reversed(re_chained):
+                            if ev.get("project") == slug:
+                                rev = ev["revision"]
+                                break
+                        if rev is not None:
+                            rec["rev"] = rev
+                            rec["head_event"] = next((ev["hash"] for ev in reversed(re_chained) if ev.get("project")==slug), rec.get("head_event"))
+                        atomic_write(dest, json.dumps(rec, indent=2, sort_keys=True) + "\n")
+                    except Exception:
+                        atomic_write(dest, rr.stdout if rr.stdout.endswith("\n") else rr.stdout + "\n")
+                else:
+                    atomic_write(dest, rr.stdout if rr.stdout.endswith("\n") else rr.stdout + "\n")
+        # Also need to update state.json projects from new records
+        state = json.load(open(store.state_path))
+        for fp in files_to_checkout:
+            if fp.startswith("records/"):
+                slug = fp[len("records/"):-len(".json")]
+                rec = json.load(open(os.path.join(home, fp)))
+                state["projects"][slug] = rec
+        # Also for inbox kind, inbox already copied
+    except Exception as e:
+        print("records-move failed: %s" % e, file=sys.stderr)
+        raise
 
-        if crash_after == "records-move":
-            print("CRASH injected after records-move", file=sys.stderr)
-            os._exit(1)
+    if crash_after == "records-move":
+        print("CRASH injected after records-move", file=sys.stderr)
+        os._exit(1)
 
-        # Append merge event
-        merge_rev = (re_chained[-1]["revision"] + 1) if re_chained else (main_last_rev + 1)
-        # if no events in segment (should not happen) handle
-        merge_prev = re_chained[-1]["hash"] if re_chained else main_head_hash
-        merge_seq = (re_chained[-1]["seq"] + 1) if re_chained else main_head_seq
-        merge_ev = {"seq": merge_seq, "prev_hash": merge_prev, "revision": merge_rev, "ts": utcnow(), "writer": session, "kind": "merge", "project": None, "data": {"proposal": proposal_branch, "session": manifest.get("session"), "base": base_commit, "merged_events": len(re_chained), "verdict": "accept"}, "note": "merge %s" % proposal_branch}
-        tmp = dict(merge_ev); tmp.pop("hash", None)
-        merge_ev["hash"] = event_hash(merge_prev, tmp)
-        with open(store.events_path, "a") as f:
-            f.write(json.dumps(merge_ev, sort_keys=True) + "\n")
-            f.flush(); os.fsync(f.fileno())
+    # Append merge event
+    merge_rev = (re_chained[-1]["revision"] + 1) if re_chained else (main_last_rev + 1)
+    # if no events in segment (should not happen) handle
+    merge_prev = re_chained[-1]["hash"] if re_chained else main_head_hash
+    merge_seq = (re_chained[-1]["seq"] + 1) if re_chained else main_head_seq
+    merge_ev = {"seq": merge_seq, "prev_hash": merge_prev, "revision": merge_rev, "ts": utcnow(), "writer": session, "kind": "merge", "project": None, "data": {"proposal": proposal_branch, "session": manifest.get("session"), "base": base_commit, "merged_events": len(re_chained), "verdict": "accept"}, "note": "merge %s" % proposal_branch}
+    tmp = dict(merge_ev); tmp.pop("hash", None)
+    merge_ev["hash"] = event_hash(merge_prev, tmp)
+    with open(store.events_path, "a") as f:
+        f.write(json.dumps(merge_ev, sort_keys=True) + "\n")
+        f.flush(); os.fsync(f.fileno())
 
-        # Update state revision to merge_rev
-        state["revision"] = merge_rev
-        state["updated_utc"] = merge_ev["ts"]
-        state["writer"] = session
-        atomic_write(store.state_path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+    # Update state revision to merge_rev
+    state["revision"] = merge_rev
+    state["updated_utc"] = merge_ev["ts"]
+    state["writer"] = session
+    atomic_write(store.state_path, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
-        if crash_after == "projection":
-            # crash before projection write — leave stale projection
-            print("CRASH injected before projection", file=sys.stderr)
-            # commit events + records but not projection
-            try:
-                run_git(["add", "events.jsonl", "state.json", "records", "inbox"], cwd=home, check=False)
-                st = run_git(["status", "--porcelain"], cwd=home, check=False)
-                if st.stdout.strip():
-                    run_git(["commit", "-m", "merge %s (%d events) -> rev %d (crash before projection)" % (proposal_branch, len(re_chained), merge_rev)], cwd=home)
-            except Exception:
-                pass
-            os._exit(1)
-
-        # Regenerate projection
+    if crash_after == "projection":
+        # crash before projection write — leave stale projection
+        print("CRASH injected before projection", file=sys.stderr)
+        # commit events + records but not projection
         try:
-            from orda2.orda2_projection import write_projection
-            write_projection(home)
-        except Exception as e:
-            print("projection failed: %s" % e, file=sys.stderr)
-            raise
-
-        # Commit everything
-        try:
-            run_git(["add", "events.jsonl", "state.json", "records", "inbox", "projection"], cwd=home, check=False)
-            # also add proposal-conflicts etc if any leftover
+            run_git(["add", "events.jsonl", "state.json", "records", "inbox"], cwd=home, check=False)
             st = run_git(["status", "--porcelain"], cwd=home, check=False)
             if st.stdout.strip():
-                run_git(["commit", "-m", "merge %s (%d events) -> rev %d" % (proposal_branch, len(re_chained), merge_rev)], cwd=home)
-        except Exception as e:
-            print("git commit after merge failed: %s" % e, file=sys.stderr)
-            raise
-
-        # verdict file
-        cid = proposal_branch.replace("/", "-")
-        os.makedirs(os.path.join(home, "reviews"), exist_ok=True)
-        atomic_write(os.path.join(home, "reviews", "%s.json" % cid), json.dumps({"proposal": proposal_branch, "verdict": "accept", "merged_events": len(re_chained), "revision": merge_rev, "session": session}, indent=2, sort_keys=True) + "\n")
-        try:
-            run_git(["add", "reviews/%s.json" % cid], cwd=home, check=False)
-            st = run_git(["status", "--porcelain", "reviews/%s.json" % cid], cwd=home, check=False)
-            if st.stdout.strip():
-                run_git(["commit", "-m", "verdict accept %s" % cid], cwd=home)
+                run_git(["commit", "-m", "merge %s (%d events) -> rev %d (crash before projection)" % (proposal_branch, len(re_chained), merge_rev)], cwd=home)
         except Exception:
             pass
+        os._exit(1)
+
+    # Regenerate projection
+    try:
+        from orda2.orda2_projection import write_projection
+        write_projection(home)
+    except Exception as e:
+        print("projection failed: %s" % e, file=sys.stderr)
+        raise
+
+    # Commit everything
+    try:
+        run_git(["add", "events.jsonl", "state.json", "records", "inbox", "projection"], cwd=home, check=False)
+        # also add proposal-conflicts etc if any leftover
+        st = run_git(["status", "--porcelain"], cwd=home, check=False)
+        if st.stdout.strip():
+            run_git(["commit", "-m", "merge %s (%d events) -> rev %d" % (proposal_branch, len(re_chained), merge_rev)], cwd=home)
+    except Exception as e:
+        print("git commit after merge failed: %s" % e, file=sys.stderr)
+        raise
+
+    # verdict file
+    cid = proposal_branch.replace("/", "-")
+    os.makedirs(os.path.join(home, "reviews"), exist_ok=True)
+    atomic_write(os.path.join(home, "reviews", "%s.json" % cid), json.dumps({"proposal": proposal_branch, "verdict": "accept", "merged_events": len(re_chained), "revision": merge_rev, "session": session}, indent=2, sort_keys=True) + "\n")
+    try:
+        run_git(["add", "reviews/%s.json" % cid], cwd=home, check=False)
+        st = run_git(["status", "--porcelain", "reviews/%s.json" % cid], cwd=home, check=False)
+        if st.stdout.strip():
+            run_git(["commit", "-m", "verdict accept %s" % cid], cwd=home)
+    except Exception:
+        pass
 
     print(json.dumps({"merged": proposal_branch, "events": len(re_chained), "revision": merge_rev}, indent=2, sort_keys=True))
     return 0
