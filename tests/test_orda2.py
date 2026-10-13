@@ -115,6 +115,9 @@ def test_crash_recovery():
             # zero lost events: compare event count >= genesis+proposed
             events=open(os.path.join(home,"events.jsonl")).read().strip().split("\n")
             assert len(events) >= 2, events
+            recovered = json.load(open(os.path.join(home, "records", "proj-a.json")))
+            assert recovered["summary"] == "crash test %s" % stage
+            assert json.load(open(os.path.join(home, "state.json")))["projects"]["proj-a"] == recovered
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

@@ -31,16 +31,32 @@ class StoreError(Exception):
         self.code = code
 
 
+def fsync_directory(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def atomic_write(path, text):
     d = os.path.dirname(path)
+    missing = []
+    parent = d
+    while not os.path.exists(parent):
+        missing.append(parent)
+        parent = os.path.dirname(parent)
     os.makedirs(d, exist_ok=True)
+    for created in reversed(missing):
+        fsync_directory(os.path.dirname(created))
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-")
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
+        with os.fdopen(fd, "wb") as f:
+            f.write(text.encode("utf-8") if isinstance(text, str) else text)
             f.flush()
             os.fsync(f.fileno())
         os.rename(tmp, path)
+        fsync_directory(d)
     except BaseException:
         if os.path.exists(tmp):
             os.unlink(tmp)
@@ -295,7 +311,8 @@ class Store:
                 pass
         if takeover in ("stale-lease-recovery", "stolen-from-live-holder"):
             # record takeover event
-            self._append_event_locked({"revision": self.load_state().get("revision", 0) + 1 if os.path.exists(self.state_path) else 1, "ts": now, "writer": session, "kind": "takeover", "project": None, "data": {"from": prev_holder, "mode": takeover, "epoch": epoch}, "note": takeover})
+            events = self.read_events()
+            self._append_event_locked({"revision": events[-1]["revision"] + 1 if events else 1, "ts": now, "writer": session, "kind": "takeover", "project": None, "data": {"from": prev_holder, "mode": takeover, "epoch": epoch}, "note": takeover})
             # after writing event, update state revision
         return new_seat
 
@@ -430,6 +447,10 @@ class Store:
 
     # ---- verify / reconcile ----
     def verify(self):
+        with Lock(self.home):
+            return self._verify_locked()
+
+    def _verify_locked(self, recovering=False):
         problems = []
         exceptions = []
         # Read events with corruption handling
@@ -440,8 +461,13 @@ class Store:
             return {"ok": False, "problems": [str(e)], "exceptions": [], "events": 0}
         except Exception as e:
             return {"ok": False, "problems": ["events read failed: %s — integrity failure" % e], "exceptions": [], "events": 0}
-        chain_problems, exceptions = verify_chain(events)
+        try:
+            chain_problems, exceptions = verify_chain(events)
+        except Exception as e:
+            return {"ok": False, "problems": ["event chain integrity failure: %s" % e], "exceptions": [], "events": len(events)}
         problems.extend(chain_problems)
+        if chain_problems:
+            return {"ok": False, "problems": problems, "exceptions": exceptions, "events": len(events)}
         # Check state.json parses
         if os.path.exists(self.state_path):
             try:
@@ -479,6 +505,10 @@ class Store:
                         problems.append("records/%s corrupt: unparseable JSON (%s) — integrity failure" % (fn, e.msg))
                     except Exception as e:
                         problems.append("records/%s read failed: %s — integrity failure" % (fn, e))
+        try:
+            problems.extend(self._payload_problems(events, recovering))
+        except Exception as e:
+            problems.append("payload integrity failure: %s" % e)
         # git fsck quick — catches corrupt git objects
         try:
             r = run_git(["fsck", "--no-dangling"], cwd=self.home, check=False)
@@ -496,50 +526,106 @@ class Store:
             problems.append(boundary)
         return {"ok": not problems, "problems": problems, "exceptions": exceptions, "events": len(events)}
 
+    def _payload_problems(self, events, recovering=False):
+        from orda2.orda2_recovery import published, latest_targets, file_digest, text_digest, digest
+        journals = published(self.home, events)
+        latest = latest_targets(journals)
+        before_states = {p: entry["before_state_sha256"] for intent, _, _ in journals
+                         for p, entry in intent["files"].items() if p.startswith("records/")}
+        problems = []
+        state = self.load_state()
+        records = {}
+        directory = os.path.join(self.home, "records")
+        for fn in os.listdir(directory) if os.path.isdir(directory) else []:
+            if fn.endswith(".json"):
+                with open(os.path.join(directory, fn)) as f:
+                    rec = json.load(f)
+                if not isinstance(rec, dict) or rec.get("slug") != fn[:-5]:
+                    problems.append("record slug/path mismatch: records/%s" % fn)
+                records[fn[:-5]] = rec
+        for path, (before, text, seq) in latest.items():
+            current = file_digest(os.path.join(self.home, path))
+            if current != text_digest(text):
+                if current == before:
+                    if not recovering:
+                        problems.append("pending recovery payload: %s (run reconcile)" % path)
+                else:
+                    problems.append("recovery integrity failure: unrelated or corrupt current file %s" % path)
+        for slug in set(records) | set(state.get("projects", {})):
+            if digest(records.get(slug)) != digest(state.get("projects", {}).get(slug)):
+                path = "records/%s.json" % slug
+                allowed = False
+                if path in latest:
+                    _, text, _ = latest[path]
+                    value = state.get("projects", {}).get(slug)
+                    allowed = digest(value) in (digest(json.loads(text)), before_states[path])
+                if not (recovering and allowed):
+                    problems.append("record/state payload mismatch: %s" % slug)
+        # Imported v1 events precede genesis and retain their own rev/hash rules.
+        genesis = max((e["seq"] for e in events if e.get("kind") == "genesis"), default=0)
+        updates = {}
+        for e in events:
+            if e["seq"] > genesis and e.get("kind") in ("update", "project-upsert", "project-remove") and e.get("project"):
+                updates[e["project"]] = e
+        for slug, e in updates.items():
+            if e.get("recovery_id"):
+                continue  # full target bytes checked above
+            rec = records.get(slug)
+            if e.get("kind") == "project-remove":
+                if rec is not None:
+                    problems.append("legacy removal not materialized: %s; missing recovery evidence" % slug)
+            elif (e["revision"] > state.get("revision", 0) or rec is None or
+                  rec.get("rev") != e["revision"] or rec.get("head_event") != e["hash"] or
+                  any(digest(rec.get(k)) != digest(v) for k, v in (e.get("data") or {}).items() if k not in ("rev",))):
+                problems.append("legacy update payload cannot be established: %s; missing recovery evidence" % slug)
+        return problems
+
     def reconcile(self, session="reconcile"):
-        """Rebuild state.json + projection from events.jsonl + records on main."""
-        # First verify integrity — refuse if corrupt (do not silently rebuild)
-        report = self.verify()
-        # Refuse on any chain integrity failure; only stale state/projection (crash window) is recoverable.
-        if not report.get("ok", False):
-            non_recoverable = []
-            for prob in report.get("problems", []):
-                low = prob.lower()
-                if "behind" in low or "stale projection" in low:
-                    continue
-                non_recoverable.append(prob)
-            if non_recoverable:
-                raise StoreError(EXIT_INTEGRITY, "reconcile refused: chain integrity failure — %s (verify exit 5; repair corruption before reconciling)" % "; ".join(non_recoverable[:2]))
-        # If verify passed or only had recoverable staleness, proceed to rebuild
+        """Replay bound durable intents, then rebuild state/projection under one lock."""
         with Lock(self.home):
-            # Re-check events still parse (defensive)
-            try:
-                events = read_events(self.events_path)
-            except ValueError as e:
-                raise StoreError(EXIT_INTEGRITY, "reconcile refused: %s" % e)
-            # rebuild state from records on disk (main) + events
-            state = {"schema_version": SCHEMA_VERSION, "revision": events[-1]["revision"] if events else 0, "epoch": self.load_seat().get("epoch", 1), "updated_utc": events[-1]["ts"] if events else utcnow(), "writer": session, "projects": {}}
-            # Load all records from disk
-            rec_dir = os.path.join(self.home, "records")
-            if os.path.isdir(rec_dir):
-                for fn in os.listdir(rec_dir):
-                    if fn.endswith(".json"):
-                        try:
-                            rec = json.load(open(os.path.join(rec_dir, fn)))
-                            state["projects"][rec.get("slug") or fn[:-5]] = rec
-                        except Exception:
-                            # If a record file is corrupt, we already flagged it as corruption above and refused,
-                            # so this branch shouldn't be reached for corrupt files.
-                            pass
-            # ensure revision matches last event
-            if events:
-                state["revision"] = events[-1]["revision"]
-                state["updated_utc"] = events[-1]["ts"]
+            report = self._verify_locked(recovering=True)
+            hard = [p for p in report["problems"] if not
+                    (p.startswith("state revision ") and " behind event log revision " in p or
+                     p.startswith("projection brief.json at revision ") and "stale projection" in p)]
+            if hard:
+                raise StoreError(EXIT_INTEGRITY, "reconcile refused: %s" % "; ".join(hard[:2]))
+            from orda2.orda2_recovery import published, recover_files
+            events = read_events(self.events_path)
+            journals = published(self.home, events)
+            from orda2.orda2_recovery import latest_targets
+            paths = {"events.jsonl", "state.json", "projection/brief.json", "projection/brief.md"}
+            paths.update(latest_targets(journals))
+            paths.update("recovery/%s.json" % e["recovery_id"] for e in events if "recovery_id" in e)
+            # git commit consumes the whole index. Only exact validated files
+            # may be staged; recursive adds could sweep unknown inbox/evidence.
+            staged = run_git(["diff", "--cached", "--name-only", "-z"], cwd=self.home)
+            foreign = [p for p in staged.stdout.split("\0") if p and p not in paths]
+            if foreign:
+                raise StoreError(EXIT_INTEGRITY, "reconcile refused: unrelated staged paths (leave them in their own commit): %s" % ", ".join(foreign[:3]))
+            recover_files(self.home, journals, events)
+            state = {"schema_version": SCHEMA_VERSION,
+                     "revision": events[-1]["revision"] if events else 0,
+                     "epoch": self.load_seat().get("epoch", 1),
+                     "updated_utc": events[-1]["ts"] if events else utcnow(),
+                     "writer": session, "projects": {}}
+            for fn in os.listdir(os.path.join(self.home, "records")) if os.path.isdir(os.path.join(self.home, "records")) else []:
+                if fn.endswith(".json"):
+                    with open(os.path.join(self.home, "records", fn)) as f:
+                        state["projects"][fn[:-5]] = json.load(f)
             atomic_write(self.state_path, json.dumps(state, indent=2, sort_keys=True) + "\n")
-            # rebuild projection
-            try:
-                from orda2.orda2_projection import write_projection
-                write_projection(self.home)
-            except Exception:
-                pass
+            if os.environ.get("ORDA2_CRASH_AFTER") == "recovery-state":
+                os._exit(1)
+            from orda2.orda2_projection import write_projection
+            write_projection(self.home)
+            if os.environ.get("ORDA2_CRASH_AFTER") == "recovery-projection":
+                os._exit(1)
+            report = self._verify_locked()
+            if not report["ok"]:
+                raise StoreError(EXIT_INTEGRITY, "reconcile refused: %s" % "; ".join(report["problems"][:2]))
+            # Recovery must leave a clean main for the next proposal. Add only
+            # store-owned paths, never arbitrary runtime or foreign files.
+            run_git(["add", "--"] + sorted(paths), cwd=self.home)
+            changed = run_git(["diff", "--cached", "--name-only"], cwd=self.home)
+            if changed.stdout.strip():
+                run_git(["commit", "-m", "reconcile durable store through revision %s" % state["revision"]], cwd=self.home)
             return state
